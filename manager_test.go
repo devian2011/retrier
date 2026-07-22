@@ -188,6 +188,14 @@ type mockLogger struct{}
 func (m *mockLogger) Infof(string, ...interface{})  {}
 func (m *mockLogger) Errorf(string, ...interface{}) {}
 
+// --- Helper to read buffer length safely ---
+
+func bufferLen(mgr *Manager) int {
+	mgr.bufferMtx.Lock()
+	defer mgr.bufferMtx.Unlock()
+	return len(mgr.buffer)
+}
+
 // --- Tests ---
 
 func TestManager_Submit(t *testing.T) {
@@ -354,6 +362,70 @@ func TestManager_GetRetriableTasks_SkipsFutureTasks(t *testing.T) {
 	}
 }
 
+func TestManager_GetRetriableTasks_DeadlineExceeded(t *testing.T) {
+	store := &mockStore{}
+	past := time.Now().Add(-time.Hour)
+	store.SetTasks([]Task{
+		{
+			ID:            uuid.New(),
+			Worker:        "w1",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+			Deadline:      past, // deadline already passed
+		},
+	})
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	wOut := make(chan WorkerExecutionResult, 10)
+	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
+	_ = mgr.RegisterWorker("w1", w, nil)
+	mgr.Start()
+	defer mgr.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// The task should not be submitted to the worker
+	if got := w.GetSubmittedTasks(); got != 0 {
+		t.Errorf("expected 0 Submit (deadline exceeded), got %d", got)
+	}
+	// The store should have saved the task as failure (via saveBadWorkerTask)
+	if saved := store.GetSaved(); saved < 1 {
+		t.Errorf("expected at least 1 SaveTask call, got %d", saved)
+	}
+}
+
+func TestManager_GetRetriableTasks_DeadlineInFuture(t *testing.T) {
+	store := &mockStore{}
+	future := time.Now().Add(time.Hour)
+	store.SetTasks([]Task{
+		{
+			ID:            uuid.New(),
+			Worker:        "w1",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+			Deadline:      future, // deadline in future, task should be processed
+		},
+	})
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	wOut := make(chan WorkerExecutionResult, 10)
+	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
+	_ = mgr.RegisterWorker("w1", w, nil)
+	mgr.Start()
+	defer mgr.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// Task should be submitted because deadline is in future
+	if got := w.GetSubmittedTasks(); got != 1 {
+		t.Errorf("expected 1 Submit (deadline in future), got %d", got)
+	}
+}
+
 func TestManager_GetRetriableTasks_WithoutBreaker(t *testing.T) {
 	store := &mockStore{}
 	taskID := uuid.New()
@@ -514,19 +586,14 @@ func TestManager_PipelineAndBufferFallback(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	mgr.bufferMtx.Lock()
-	bufLen := len(mgr.buffer)
-	mgr.bufferMtx.Unlock()
-	if bufLen != 1 {
+	if bufLen := bufferLen(mgr); bufLen != 1 {
 		t.Errorf("buffer size expected 1, got %d", bufLen)
 	}
 
 	store.SetSaveErr(nil)
 	mgr.flushBuffer()
-	mgr.bufferMtx.Lock()
-	bufLen = len(mgr.buffer)
-	mgr.bufferMtx.Unlock()
-	if bufLen != 0 {
+
+	if bufLen := bufferLen(mgr); bufLen != 0 {
 		t.Errorf("buffer should be empty, got %d", bufLen)
 	}
 }
@@ -550,7 +617,7 @@ func TestManager_GracefulStop(t *testing.T) {
 	}
 }
 
-func TestManager_StopTwice(*testing.T) {
+func TestManager_StopTwice(t *testing.T) {
 	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	mgr.Start()
 	mgr.Stop()

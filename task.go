@@ -38,16 +38,22 @@ type Task struct {
 	Retries int `json:"retries"`
 	// MaxRetries max tries count
 	MaxRetries int `json:"max_retries"`
-	// backOffCode code of back off strategy
+	// BackOffCode code of back off strategy
 	BackOffCode string `json:"backoff_code"`
-	// backOffParams params for back off strategy
+	// BackOffParams params for back off strategy
 	BackOffParams map[BackOffParam]interface{} `json:"backoff_params"`
 
-	// createdAt records the exact timestamp when the task was initially created.
+	// Deadline is an optional time limit for task completion.
+	// If the current time exceeds this deadline before the task starts executing,
+	// the task will be marked as failed with a critical error and will not be retried.
+	// Zero value (time.Time{}) indicates no deadline.
+	Deadline time.Time `json:"deadline"`
+
+	// CreatedAt records the exact timestamp when the task was initially created.
 	CreatedAt time.Time `json:"created_at"`
-	// lastRun records the timestamp of the most recent execution attempt, if any.
+	// LastRun records the timestamp of the most recent execution attempt, if any.
 	LastRun time.Time `json:"last_run"`
-	// nextRun records the scheduled timestamp when the task should be picked up next.
+	// NextRun records the scheduled timestamp when the task should be picked up next.
 	NextRun time.Time `json:"next_run"`
 }
 

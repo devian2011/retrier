@@ -9,6 +9,7 @@
 -   **Circuit Breaker** with sliding window failure rate detection to protect workers from cascading failures.
 -   **Event publishing** – receive real-time notifications for every completed task execution.
 -   **Enhanced status** – query worker statuses including circuit breaker state.
+-   **Task deadlines** – tasks that exceed their deadline are automatically marked as failed and are not retried.
 
 ---
 
@@ -22,6 +23,7 @@
 -   **Circuit Breaker** – sliding window failure‑rate based protection. Automatically opens when failure ratio exceeds a threshold, and allows probing after a timeout.
 -   **Event Publisher** – implement `EventPublisher` to receive every task result as soon as it is processed (e.g., for notifications, metrics, or logging).
 -   **Comprehensive status** – `GetWorkerStatuses()` now returns `FullWorkerState` which includes the circuit breaker state for each worker.
+-   **Task Deadlines** – each task can have a `Deadline`; if the deadline passes before execution, the task is marked as failed with a critical error and never retried.
 -   **Thread‑safe** – all exported methods are safe for concurrent use.
 
 ---
@@ -46,6 +48,7 @@ Represents a unit of work. It includes:
 -   `Status` – current lifecycle state (`pending`, `success`, `failure`, etc.).
 -   `Retries` / `MaxRetries` – attempt counter and limit.
 -   `BackOffCode` and `BackOffParams` – retry scheduling configuration.
+-   `Deadline` (optional) – absolute time by which the task must complete. If the deadline is in the past when the task is picked up, it is immediately marked as failed with a critical state and will not be retried.
 -   Timestamps (`CreatedAt`, `LastRun`, `NextRun`) – for scheduling and monitoring.
 
 ### 2\. `TaskExecutionResult`
@@ -76,6 +79,7 @@ Orchestrates multiple workers registered by name. It:
 -   Buffers results in memory if storage fails, and periodically retries flushing.
 -   Integrates with **Circuit Breakers** per worker to prevent overloading failing services.
 -   Publishes every completed result via an optional `EventPublisher`.
+-   Automatically checks task **deadlines** before submitting to the worker; expired tasks are marked as failed and are never retried.
 
 ### 5\. `BackOffStrategy`
 
@@ -110,6 +114,23 @@ If you pass a non‑nil publisher to `NewManager`, the `Manager` will call `Publ
 -   Feeding metrics and monitoring systems.
 -   Triggering downstream workflows.
 
+### 8\. Task Deadlines
+
+You can set a `Deadline` on a `Task` – an absolute time by which the task must be processed. When the manager periodically fetches tasks, it compares the current time with the deadline. If the deadline has already passed (i.e., `task.Deadline.Before(time.Now())`), the task is **never submitted** to the worker. Instead, it is marked as `StatusFailure` with a critical error and will not be retried (even if `MaxRetries` is not exhausted).
+
+This is useful for time‑sensitive operations such as user requests that have a timeout, or batch jobs that must finish by a certain time.
+
+The deadline is stored in the `Task` struct and is persisted along with other fields via the `Store` interface.
+
+```go
+type Task struct {
+    // ...
+    Deadline time.Time `json:"deadline"`
+}
+```
+
+Example: if you create a task with a deadline 30 seconds from now, and the system is heavily backlogged, the task will be automatically dropped (marked as failed) once that deadline passes, preventing wasted work and helping maintain SLAs.
+
 ---
 
 ## Persistence – Store Interface
@@ -141,6 +162,7 @@ When you store a `Task`, you must preserve at least the following fields so that
 -   `BackOffCode` and `BackOffParams` – used to compute `NextRun`.
 -   `CreatedAt`, `LastRun`, `NextRun` – scheduling timestamps.
 -   `Payload` – the actual data to be processed.
+-   `Deadline` – if set, the time by which the task must be completed.
 
 Additionally, each `TaskExecutionResult` should be stored to keep a history of attempts. The `SaveTask` method receives both the updated task and the result of the latest attempt. The manager updates the task’s `Retries`, `LastRun`, `NextRun`, and `Status` **before** calling `SaveTask`. Therefore, your store should simply persist the given `Task` and `TaskExecutionResult` as is.
 
@@ -357,6 +379,22 @@ task := retrier.Task{
 ```
 
 When a task fails with a `UsualState` error, the `Manager` (or your custom logic) can call `BackOffStrategy.Get(task)` to compute the next `NextRun` time and reschedule it.
+
+### Using Deadlines
+
+You can add a deadline to a task to enforce a maximum processing window. If the task cannot be picked up before the deadline, it will be automatically marked as failed with a critical error.
+
+```go
+task := retrier.Task{
+	ID:           retrier.GetID(),
+	Worker:       "myWorker",
+	Payload:      []byte("time-sensitive job"),
+	MaxRetries:   3,
+	Deadline:     time.Now().Add(30 * time.Second), // must start within 30 seconds
+}
+```
+
+If the task remains queued past this deadline, the manager will not submit it to the worker and will set its status to `StatusFailure` with a critical error, so it will never be retried.
 
 ---
 

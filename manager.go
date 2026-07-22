@@ -245,8 +245,8 @@ func (m *Manager) getRetriableTasks() {
 			}
 
 			newTasks := make([]*Task, 0, len(tasks))
-			m.pTasksMtx.RLock()
 			now := time.Now()
+			m.pTasksMtx.RLock()
 			for _, t := range tasks {
 				t := t
 				// Skip finished tasks and tasks with NextRun in the future (not ready)
@@ -260,9 +260,14 @@ func (m *Manager) getRetriableTasks() {
 			m.pTasksMtx.RUnlock()
 
 			for _, task := range newTasks {
+				if !task.Deadline.IsZero() && task.Deadline.Before(now) {
+					m.saveBadWorkerTask(task, []byte("retrier: deadline exceeded"))
+					continue
+				}
+
 				worker, exists := m.workers[task.Worker]
 				if !exists {
-					m.saveUnknownWorkerTask(task)
+					m.saveBadWorkerTask(task, []byte(fmt.Sprintf("retrier: unknown worker %s", task.Worker)))
 					continue
 				}
 
@@ -297,8 +302,8 @@ func (m *Manager) getRetriableTasks() {
 	}
 }
 
-// saveUnknownWorkerTask handles tasks that reference a non-existent worker.
-func (m *Manager) saveUnknownWorkerTask(task *Task) {
+// saveBadWorkerTask handles tasks that reference a non-existent worker.
+func (m *Manager) saveBadWorkerTask(task *Task, message []byte) {
 	tr := WorkerExecutionResult{
 		task: task,
 		result: &TaskExecutionResult{
@@ -306,12 +311,15 @@ func (m *Manager) saveUnknownWorkerTask(task *Task) {
 			TaskID:        task.ID,
 			Status:        StatusFailure,
 			RunAt:         time.Now(),
-			Result:        []byte(fmt.Sprintf("retrier: unknown worker %s", task.Worker)),
+			Result:        message,
 			IsCritical:    true,
 			ExecutionTime: 0,
 		},
 	}
 	saveErr := m.store.SaveTask(task, tr.result)
+	if m.eventPublisher != nil {
+		m.eventPublisher.Publish(tr)
+	}
 	if saveErr != nil {
 		m.logger.Errorf("retrier: save task failed: %v", saveErr)
 		m.bufferMtx.Lock()
