@@ -11,7 +11,7 @@ import (
 // initial status.
 func TestWorker_NewWorker(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -27,7 +27,7 @@ func TestWorker_NewWorker(t *testing.T) {
 // TestWorker_SetMinAndMaxWorkers checks that the boundaries can be changed.
 func TestWorker_SetMinAndMaxWorkers(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -40,7 +40,7 @@ func TestWorker_SetMinAndMaxWorkers(t *testing.T) {
 // TestWorker_SetIdleTimeout verifies that the idle timeout can be set.
 func TestWorker_SetIdleTimeout(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -55,7 +55,7 @@ func TestWorker_SetIdleTimeout(t *testing.T) {
 // transitions the pool to the running state.
 func TestWorker_Start(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -84,7 +84,7 @@ func TestWorker_Start(t *testing.T) {
 // completes successfully and produces a result.
 func TestWorker_Submit_Success(t *testing.T) {
 	ctx := context.Background()
-	fn := func(payload []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, payload []byte) (string, *ExecutionError) {
 		return "processed: " + string(payload), nil
 	}
 	w := NewWorker(ctx, fn)
@@ -118,7 +118,7 @@ func TestWorker_Submit_Success(t *testing.T) {
 // non-running pool returns an error.
 func TestWorker_Submit_WhenNotRunning(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -133,7 +133,7 @@ func TestWorker_Submit_WhenNotRunning(t *testing.T) {
 // when all existing workers are busy and the maximum limit has not been reached.
 func TestWorker_Submit_ScalingUp(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		time.Sleep(200 * time.Millisecond) // simulate work
 		return "ok", nil
 	}
@@ -175,7 +175,7 @@ func TestWorker_Submit_ScalingUp(t *testing.T) {
 // when all workers are busy and the maximum cap has been reached.
 func TestWorker_Submit_BlocksWhenMaxWorkersReached(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		time.Sleep(300 * time.Millisecond) // long-running work
 		return "ok", nil
 	}
@@ -218,7 +218,7 @@ func TestWorker_Submit_BlocksWhenMaxWorkersReached(t *testing.T) {
 // then transitions to the stopped state.
 func TestWorker_Stop(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -226,7 +226,7 @@ func TestWorker_Stop(t *testing.T) {
 	w.Start()
 
 	// Use a slow worker to keep a task active.
-	fnSlow := func(_ []byte) (string, *ExecutionError) {
+	fnSlow := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		time.Sleep(500 * time.Millisecond)
 		return "ok", nil
 	}
@@ -267,7 +267,7 @@ func TestWorker_Stop(t *testing.T) {
 // prevents new submissions while active tasks are allowed to finish.
 func TestWorker_Suspend(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		time.Sleep(100 * time.Millisecond)
 		return "ok", nil
 	}
@@ -303,7 +303,7 @@ func TestWorker_Suspend(t *testing.T) {
 // propagated as failure results.
 func TestWorker_ExecutionError(t *testing.T) {
 	ctx := context.Background()
-	fn := func(payload []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, payload []byte) (string, *ExecutionError) {
 		if string(payload) == "critical" {
 			return "", &ExecutionError{Err: errors.New("critical error"), State: CriticalState}
 		}
@@ -358,7 +358,7 @@ func TestWorker_ExecutionError(t *testing.T) {
 // scale down to the minimum number.
 func TestWorker_IdleTimeout_ScaleDown(t *testing.T) {
 	ctx := context.Background()
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -390,7 +390,7 @@ func TestWorker_IdleTimeout_ScaleDown(t *testing.T) {
 // remains Running until Stop is called.
 func TestWorker_ContextCancellationDuringTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	fn := func(_ []byte) (string, *ExecutionError) {
+	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		time.Sleep(500 * time.Millisecond) // long task
 		return "ok", nil
 	}

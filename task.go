@@ -1,6 +1,7 @@
 package retrier
 
 import (
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,8 @@ func getID() uuid.UUID {
 type Task struct {
 	// ID uniquely identifies this task across the entire system.
 	ID uuid.UUID `json:"id"`
+	// Ctx context for tracing
+	Ctx context.Context `json:"-"`
 	// Payload holds the strongly-typed input arguments required for task execution.
 	Payload []byte `json:"payload"`
 	// ManagerWorker specifies the designated runner type or queue name for this task.

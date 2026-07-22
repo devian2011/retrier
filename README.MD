@@ -10,6 +10,7 @@
 -   **Event publishing** – receive real-time notifications for every completed task execution.
 -   **Enhanced status** – query worker statuses including circuit breaker state.
 -   **Task deadlines** – tasks that exceed their deadline are automatically marked as failed and are not retried.
+-   **Context support** – `WorkerFn` now receives a `context.Context`, enabling distributed tracing, cancellation, and deadline propagation.
 
 ---
 
@@ -24,6 +25,7 @@
 -   **Event Publisher** – implement `EventPublisher` to receive every task result as soon as it is processed (e.g., for notifications, metrics, or logging).
 -   **Comprehensive status** – `GetWorkerStatuses()` now returns `FullWorkerState` which includes the circuit breaker state for each worker.
 -   **Task Deadlines** – each task can have a `Deadline`; if the deadline passes before execution, the task is marked as failed with a critical error and never retried.
+-   **Context support** – `WorkerFn` receives a `context.Context`, enabling distributed tracing, cancellation, and deadline propagation.
 -   **Thread‑safe** – all exported methods are safe for concurrent use.
 
 ---
@@ -68,6 +70,12 @@ Records the outcome of a single execution attempt. Contains:
 A pool of goroutines that executes a user‑defined `WorkerFn`.  
 It scales up when all workers are busy (up to `maxWorkers`) and scales down idle workers (down to `minWorkers`) after `idleTimeout`.  
 Tasks are submitted via `Submit()`, results are emitted on a channel obtained via `GetOutChan()`.
+
+**Context support:** The `WorkerFn` now receives a `context.Context` as its first argument. This allows you to:
+
+-   Propagate trace IDs for distributed tracing (e.g., OpenTelemetry).
+-   Handle cancellations or deadlines that were set on the task.
+-   Pass request-scoped values (e.g., user ID, authentication tokens).
 
 ### 4\. `Manager`
 
@@ -130,6 +138,22 @@ type Task struct {
 ```
 
 Example: if you create a task with a deadline 30 seconds from now, and the system is heavily backlogged, the task will be automatically dropped (marked as failed) once that deadline passes, preventing wasted work and helping maintain SLAs.
+
+### 9\. Context Support
+
+The `WorkerFn` signature now includes a `context.Context` as the first parameter:
+
+```go
+type WorkerFn func(ctx context.Context, payload []byte) (string, *ExecutionError)
+```
+
+When a task is submitted, you can attach a context to it (e.g., through a separate field or via a wrapper). The worker will pass this context to your function, enabling:
+
+-   **Distributed tracing** – create spans inside your task using OpenTelemetry.
+-   **Cancellation** – cancel long‑running tasks if needed.
+-   **Deadline propagation** – if the context carries a deadline, it will be respected.
+
+If no context is attached to the task, the worker uses its own background context.
 
 ---
 
@@ -212,8 +236,9 @@ import (
 )
 
 func main() {
-	// Define your processing function.
-	workerFn := func(payload []byte) (string, *retrier.ExecutionError) {
+	// Define your processing function (now with context).
+	workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
+		// You can use ctx for tracing, cancellation, deadlines, etc.
 		// Do some work...
 		result := fmt.Sprintf("processed: %s", string(payload))
 		return result, nil
@@ -298,7 +323,7 @@ func main() {
 		30*time.Second,  // open-state timeout
 	)
 
-	workerA := retrier.NewWorker(ctx, processA)
+	workerA := retrier.NewWorker(ctx, processA) // processA must be func(context.Context, []byte)...
 	workerA.SetMinAndMaxWorkers(1, 3)
 	manager.RegisterWorker("workerA", workerA, breakerA)
 
@@ -396,6 +421,22 @@ task := retrier.Task{
 
 If the task remains queued past this deadline, the manager will not submit it to the worker and will set its status to `StatusFailure` with a critical error, so it will never be retried.
 
+### Using Context
+
+Your `WorkerFn` receives a context. You can attach values or use it for tracing:
+
+```go
+workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
+    // Extract trace ID from context
+    traceID := ctx.Value("trace_id")
+    // Start a span using OpenTelemetry
+    ctx, span := tracer.Start(ctx, "my-task")
+    defer span.End()
+    // ... your business logic ...
+    return "ok", nil
+}
+```
+
 ---
 
 ## Error Handling
@@ -408,7 +449,7 @@ Your `WorkerFn` returns a `(string, *ExecutionError)`. The `ExecutionError` carr
 Example:
 
 ```go
-workerFn := func(payload []byte) (string, *retrier.ExecutionError) {
+workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
 	if string(payload) == "invalid" {
 		return "", &retrier.ExecutionError{
 			Err:   errors.New("validation failed"),
@@ -464,7 +505,7 @@ Then set `task.BackOffCode = "my-custom"`.
 ```go
 ctx := context.Background()
 
-workerFn := func(payload []byte) (string, *retrier.ExecutionError) {
+workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
 	// Simulate transient failure.
 	return "", &retrier.ExecutionError{
 		Err:   errors.New("service unavailable"),

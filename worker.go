@@ -41,7 +41,7 @@ type ExecutionError struct {
 
 // WorkerFn defines the execution contract for processing a task's raw payload.
 // It returns a result string (or log) and an error if the execution fails.
-type WorkerFn func(payload []byte) (string, *ExecutionError)
+type WorkerFn func(ctx context.Context, payload []byte) (string, *ExecutionError)
 
 // WorkerExecutionResult pairs the original task with its final processing metrics and outcome.
 type WorkerExecutionResult struct {
@@ -261,8 +261,13 @@ func (w *Worker) runWorker() {
 				ExecutionTime: 0,
 			}
 
+			ctx := task.Ctx
+			if ctx == nil {
+				ctx = w.ctx
+			}
+
 			timeStart := time.Now()
-			execRes, execErr := w.fn(task.Payload)
+			execRes, execErr := w.fn(ctx, task.Payload)
 			tr.ExecutionTime = time.Since(timeStart)
 
 			if execErr != nil {
