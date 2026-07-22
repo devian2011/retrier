@@ -7,12 +7,12 @@ import (
 )
 
 // CircuitBreakerState represents the state of a circuit breaker.
-type CircuitBreakerState int
+type CircuitBreakerState string
 
 const (
-	StateClosed CircuitBreakerState = iota
-	StateOpen
-	StateHalfOpen
+	StateClosed   CircuitBreakerState = "closed"
+	StateOpen     CircuitBreakerState = "open"
+	StateHalfOpen CircuitBreakerState = "half-open"
 )
 
 // CircuitBreaker implements a circuit breaker using a sliding time window.
