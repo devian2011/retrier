@@ -25,7 +25,7 @@
 ## Installation
 
 ```
-go get github.com/yourusername/retrier
+go get github.com/devian2011/retrier
 ```
 
 - - -
@@ -90,8 +90,8 @@ import (
 	"fmt"
 	"log"
 	"time"
-
-	"github.com/yourusername/retrier"
+	
+	"github.com/devian2011/retrier"
 )
 
 func main() {
@@ -139,7 +139,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/yourusername/retrier"
+	"github.com/devian2011/retrier"
 )
 
 // Implement your own Store and Logger.
@@ -159,7 +159,7 @@ func main() {
 	manager := retrier.NewManager(ctx, store, logger, retrier.NewBackOffStrategy(), 1000, 5*time.Second)
 
 	// Create a circuit breaker for workerA (sliding window: 60s, threshold 50%, min 10 requests, timeout 30s)
-	breakerA := retrier.NewSlidingWindowCircuitBreaker(
+	breakerA := retrier.NewCircuitBreaker(
 		60*time.Second,  // window size
 		0.5,             // failure threshold (50%)
 		10,              // minimum requests in window
@@ -194,14 +194,14 @@ func main() {
 
 ## Circuit Breaker Configuration
 
-The default circuit breaker implementation (`SlidingWindowCircuitBreaker`) is configured with four parameters:
+The default circuit breaker implementation (`CircuitBreaker`) is configured with four parameters:
 
 *   **windowSize** – duration of the sliding window over which success/failure counts are tracked.
 *   **failureThreshold** – ratio (0.0 to 1.0) of failures to total requests that triggers the open state.
 *   **minRequests** – minimum number of requests in the window before the threshold is evaluated.
 *   **timeout** – duration the circuit stays open before transitioning to half‑open.
 
-Example: `NewSlidingWindowCircuitBreaker(60*time.Second, 0.5, 10, 30*time.Second)`
+Example: `NewCircuitBreaker(60*time.Second, 0.5, 10, 30*time.Second)`
 
 When a worker is registered with a breaker, the `Manager` will automatically check `Allow()` before submitting a task. If the breaker is open, the task is skipped (and will be retried later). After each submission attempt, `RecordSuccess()` or `RecordFailure()` is called to update the breaker’s statistics.
 
