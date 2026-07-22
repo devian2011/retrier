@@ -1,0 +1,50 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+formatters:
+  enable:
+    - gci
+
+linters-settings:
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment
+  gosec:
+    excludes:
+      - G404
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gosec
+    - bodyclose
+    - sqlclosecheck
+    - prealloc
+    - revive
+    - gocritic
+    - unused
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
