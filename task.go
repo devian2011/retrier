@@ -12,8 +12,6 @@ type TaskStatus string
 const (
 	// StatusPending task status
 	StatusPending TaskStatus = "pending"
-	// StatusSuspended task status
-	StatusSuspended TaskStatus = "suspended"
 	// StatusSuccess task status
 	StatusSuccess TaskStatus = "success"
 	// StatusFailure task status

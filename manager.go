@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// Breaker defines the public interface for a circuit breaker.
+type Breaker interface {
+	Allow() bool
+	RecordSuccess()
+	RecordFailure()
+	State() CircuitBreakerState
+	Reset()
+}
+
 // ManagerWorker defines the contract for a component capable of processing tasks
 // and streaming execution results asynchronously.
 type ManagerWorker interface {
@@ -19,7 +28,6 @@ type ManagerWorker interface {
 
 // Store abstracts persistence layer operations for logging and auditing task outcomes.
 type Store interface {
-	// GetTasks Must return tasks with `NextRun` in the past and status is pending or suspended
 	GetTasks() ([]Task, error)
 	SaveTask(task *Task, result *TaskExecutionResult) error
 }
@@ -30,6 +38,7 @@ type Logger interface {
 	Errorf(format string, args ...interface{})
 }
 
+// BackOff defines the interface for computing the next execution time based on backoff parameters.
 type BackOff interface {
 	Get(backOff BackOffParams) (time.Time, error)
 }
@@ -46,8 +55,8 @@ type Manager struct {
 	logger  Logger
 	backOff BackOff
 
-	workers map[string]ManagerWorker
-	tasks   map[string]chan Task
+	breakers map[string]Breaker
+	workers  map[string]ManagerWorker
 
 	unionQueue chan WorkerExecutionResult
 
@@ -62,7 +71,7 @@ type Manager struct {
 	processedTasks map[string]interface{}
 }
 
-// NewManager initializes a new Manager with the required thread-safe structures and buffer configurations.
+// NewManager initializes a new Manager with the required dependencies and configurations.
 func NewManager(
 	ctx context.Context,
 	store Store,
@@ -78,8 +87,8 @@ func NewManager(
 		store:            store,
 		logger:           logger,
 		backOff:          backOff,
+		breakers:         make(map[string]Breaker),
 		workers:          make(map[string]ManagerWorker),
-		tasks:            make(map[string]chan Task),
 		buffer:           make([]WorkerExecutionResult, 0, maxBufferSize),
 		unionQueue:       make(chan WorkerExecutionResult),
 		maxBufferSize:    maxBufferSize,
@@ -119,20 +128,21 @@ func (m *Manager) saveResult() {
 		case r := <-m.unionQueue:
 			r.task.Retries++
 			r.task.LastRun = r.result.RunAt
+
 			if r.result.IsCritical {
 				r.task.Status = StatusFailure
 			} else {
 				switch r.result.Status {
 				case StatusFailure:
-					if r.task.Retries == r.task.MaxRetries {
+					if r.task.Retries >= r.task.MaxRetries {
 						r.task.Status = StatusFailure
 					} else if r.task.Retries < r.task.MaxRetries {
-						var errGetNextRun error
+						var err error
 						r.task.Status = StatusPending
-						r.task.NextRun, errGetNextRun = m.backOff.Get(r.task)
-						if errGetNextRun != nil {
+						r.task.NextRun, err = m.backOff.Get(r.task)
+						if err != nil {
 							m.logger.Errorf(
-								"retrier: error: Getting next run for task id %v: %v", r.task.ID, errGetNextRun)
+								"retrier: error: Getting next run for task id %v: %v", r.task.ID, err)
 						}
 					}
 				case StatusSuccess:
@@ -142,14 +152,12 @@ func (m *Manager) saveResult() {
 
 			saveErr := m.store.SaveTask(r.task, r.result)
 
-			// Unhold task
 			m.pTasksMtx.Lock()
 			delete(m.processedTasks, r.task.ID.String())
 			m.pTasksMtx.Unlock()
 
 			if saveErr != nil {
 				m.logger.Errorf("save task failed: %v", saveErr)
-
 				m.mtx.Lock()
 				if len(m.buffer) >= m.maxBufferSize {
 					m.logger.Errorf("retry manager: buffer size exceeds max buffer size, dropping task")
@@ -162,7 +170,7 @@ func (m *Manager) saveResult() {
 	}
 }
 
-// Submit save task to store
+// Submit saves a task to the store without executing it immediately.
 func (m *Manager) Submit(task *Task) error {
 	return m.store.SaveTask(task, nil)
 }
@@ -177,9 +185,8 @@ func (m *Manager) Start() {
 	}
 	m.isWorking = true
 
-	for name, w := range m.workers {
+	for _, w := range m.workers {
 		w.Start()
-		m.tasks[name] = make(chan Task)
 		m.wg.Add(1)
 		go m.resultCollector(w.GetOutChan())
 	}
@@ -190,6 +197,8 @@ func (m *Manager) Start() {
 	go m.getRetriableTasks()
 }
 
+// getRetriableTasks periodically fetches tasks that are due for execution
+// and submits them to the appropriate worker, subject to circuit breaker checks.
 func (m *Manager) getRetriableTasks() {
 	timer := time.NewTimer(m.fetchTaskTimeout)
 	defer timer.Stop()
@@ -200,7 +209,6 @@ func (m *Manager) getRetriableTasks() {
 		case <-m.ctx.Done():
 			return
 		case <-timer.C:
-			// If buffer not sync with store, we need to save all entities in buffer and get tasks after that
 			if len(m.buffer) > 0 {
 				continue
 			}
@@ -208,52 +216,50 @@ func (m *Manager) getRetriableTasks() {
 			tasks, getErr := m.store.GetTasks()
 			if getErr != nil {
 				m.logger.Errorf("retrier: get tasks failed: %v", getErr)
+				timer.Reset(m.fetchTaskTimeout)
+				continue
 			}
 
-			// Skip processing tasks
 			newTasks := make([]Task, 0, len(tasks))
-			m.pTasksMtx.Lock()
+			m.pTasksMtx.RLock()
 			for _, t := range tasks {
-				if _, exists := m.processedTasks[t.ID.String()]; exists {
-					continue
+				if _, exists := m.processedTasks[t.ID.String()]; !exists {
+					newTasks = append(newTasks, t)
 				}
-				newTasks = append(newTasks, t)
 			}
-			m.pTasksMtx.Unlock()
+			m.pTasksMtx.RUnlock()
 
 			for _, task := range newTasks {
+				worker, exists := m.workers[task.Worker]
+				if !exists {
+					m.saveUnknownWorkerTask(&task)
+					continue
+				}
 
-				if worker, exists := m.workers[task.Worker]; exists {
-					submitErr := worker.Submit(&task)
-					if submitErr != nil {
-						m.logger.Errorf("retrier: submit failed taskID: %s error: %v", task.ID.String(), submitErr)
-					} else {
-						// Hold task
-						m.pTasksMtx.Lock()
-						m.processedTasks[task.ID.String()] = true
-						m.pTasksMtx.Unlock()
+				// Retrieve circuit breaker for this worker (optional).
+				cb, exists := m.breakers[task.Worker]
+				if exists && cb != nil {
+					if !cb.Allow() {
+						m.logger.Infof("circuit breaker open for worker %s, skipping task %s",
+							task.Worker, task.ID.String())
+						continue
 					}
+				}
+
+				submitErr := worker.Submit(&task)
+				if submitErr != nil {
+					if exists && cb != nil {
+						cb.RecordFailure()
+					}
+					m.logger.Errorf("retrier: submit failed taskID: %s error: %v",
+						task.ID.String(), submitErr)
 				} else {
-					tr := WorkerExecutionResult{
-						task: &task,
-						result: &TaskExecutionResult{
-							ID:            getID(),
-							TaskID:        task.ID,
-							Status:        StatusFailure,
-							RunAt:         time.Now(),
-							Result:        []byte(fmt.Sprintf("retrier: unknown worker %s", task.Worker)),
-							IsCritical:    true,
-							ExecutionTime: 0,
-						}}
-					saveErr := m.store.SaveTask(&task, tr.result)
-					if saveErr != nil {
-						m.logger.Errorf("retrier: save task failed: %v", saveErr)
-						if len(m.buffer) >= m.maxBufferSize {
-							m.logger.Errorf("retrier: buffer size exceeds max buffer size, dropping task")
-						} else {
-							m.buffer = append(m.buffer, tr)
-						}
+					if exists && cb != nil {
+						cb.RecordSuccess()
 					}
+					m.pTasksMtx.Lock()
+					m.processedTasks[task.ID.String()] = true
+					m.pTasksMtx.Unlock()
 				}
 			}
 			timer.Reset(m.fetchTaskTimeout)
@@ -261,7 +267,34 @@ func (m *Manager) getRetriableTasks() {
 	}
 }
 
-// diskBufferSwap runs on a periodic ticker to flush the temporary overflow buffer back into the store.
+// saveUnknownWorkerTask handles tasks that reference a non-existent worker.
+func (m *Manager) saveUnknownWorkerTask(task *Task) {
+	tr := WorkerExecutionResult{
+		task: task,
+		result: &TaskExecutionResult{
+			ID:            getID(),
+			TaskID:        task.ID,
+			Status:        StatusFailure,
+			RunAt:         time.Now(),
+			Result:        []byte(fmt.Sprintf("retrier: unknown worker %s", task.Worker)),
+			IsCritical:    true,
+			ExecutionTime: 0,
+		},
+	}
+	saveErr := m.store.SaveTask(task, tr.result)
+	if saveErr != nil {
+		m.logger.Errorf("retrier: save task failed: %v", saveErr)
+		m.mtx.Lock()
+		if len(m.buffer) >= m.maxBufferSize {
+			m.logger.Errorf("retrier: buffer size exceeds max buffer size, dropping task")
+		} else {
+			m.buffer = append(m.buffer, tr)
+		}
+		m.mtx.Unlock()
+	}
+}
+
+// diskBufferSwap periodically flushes the in-memory buffer to the store.
 func (m *Manager) diskBufferSwap() {
 	defer m.wg.Done()
 	timer := time.NewTimer(time.Minute)
@@ -278,7 +311,7 @@ func (m *Manager) diskBufferSwap() {
 	}
 }
 
-// flushBuffer iterates over buffered tasks and updates the storage, preserving failed attempts.
+// flushBuffer iterates over buffered items and saves them to the store.
 func (m *Manager) flushBuffer() {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -289,16 +322,15 @@ func (m *Manager) flushBuffer() {
 
 	var failed []WorkerExecutionResult
 	for _, t := range m.buffer {
-		errSave := m.store.SaveTask(t.task, t.result)
-		if errSave != nil {
-			m.logger.Errorf("failed to save data from buffer: %v task: %v", errSave, t.task)
+		if err := m.store.SaveTask(t.task, t.result); err != nil {
+			m.logger.Errorf("failed to save data from buffer: %v task: %v", err, t.task)
 			failed = append(failed, t)
 		}
 	}
 	m.buffer = failed
 }
 
-// Stop gracefully shuts down the manager, cascading signals down to components and blocking until finished.
+// Stop gracefully shuts down the manager, cancels all workers, and waits for completion.
 func (m *Manager) Stop() {
 	m.mtx.Lock()
 	if !m.isWorking {
@@ -319,34 +351,41 @@ func (m *Manager) Stop() {
 	m.wg.Wait()
 }
 
-// RegisterWorker dynamically updates the manager routing pool with a new worker instance.
-func (m *Manager) RegisterWorker(name string, w ManagerWorker) error {
+// RegisterWorker adds a new worker with an optional circuit breaker.
+func (m *Manager) RegisterWorker(name string, w ManagerWorker, b Breaker) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
+
 	if _, exists := m.workers[name]; exists {
 		return fmt.Errorf("worker %s already exists", name)
 	}
+
 	m.workers[name] = w
+	if b != nil {
+		m.breakers[name] = b
+	}
+
 	if m.isWorking {
 		m.workers[name].Start()
-		m.tasks[name] = make(chan Task)
 		m.wg.Add(1)
 		go m.resultCollector(m.workers[name].GetOutChan())
 	}
 	return nil
 }
 
-// UnregisterWorker removes a worker from active routing tables and shuts it down.
+// UnregisterWorker removes a worker and its associated circuit breaker.
 func (m *Manager) UnregisterWorker(name string) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
+
 	if w, exists := m.workers[name]; exists {
 		w.Stop()
 		delete(m.workers, name)
+		delete(m.breakers, name)
 	}
 }
 
-// GetWorkerStatuses extracts a thread-safe snapshot of the current state of all tracking workers.
+// GetWorkerStatuses returns a snapshot of the current state of all registered workers.
 func (m *Manager) GetWorkerStatuses() map[string]WorkerState {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()

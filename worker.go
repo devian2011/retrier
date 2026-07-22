@@ -21,8 +21,6 @@ const (
 	WorkerStatusStopped WorkerStatus = "stopped"
 	// WorkerStatusSuspended indicates the worker pool is temporarily paused; active tasks are drained.
 	WorkerStatusSuspended WorkerStatus = "suspended"
-	// WorkerStatusHalfRunning Half-Open in circuit breaker pattern
-	WorkerStatusHalfRunning WorkerStatus = "half-running"
 )
 
 // ErrorState error state critical/usual
