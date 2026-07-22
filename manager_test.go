@@ -617,7 +617,7 @@ func TestManager_GracefulStop(t *testing.T) {
 	}
 }
 
-func TestManager_StopTwice(t *testing.T) {
+func TestManager_StopTwice(*testing.T) {
 	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	mgr.Start()
 	mgr.Stop()
