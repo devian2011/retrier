@@ -1,5 +1,3 @@
-Retrier – Task Processing with Retries, Circuit Breakers & Event Publishing body { max-width: 1000px; margin: 2rem auto; padding: 0 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.7; color: #1e1e1e; background: #fafafa; } h1, h2, h3 { margin-top: 1.8em; margin-bottom: 0.6em; border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; } h1 { border-bottom: 2px solid #2c3e50; } code { background: #f0f2f4; padding: 0.2em 0.4em; border-radius: 3px; font-size: 0.9em; color: #c7254e; } pre { background: #f6f8fa; padding: 1em 1.2em; overflow: auto; border-radius: 6px; border-left: 4px solid #2c3e50; font-size: 0.9em; } pre code { background: none; padding: 0; color: #1e1e1e; } table { border-collapse: collapse; width: 100%; margin: 1em 0; } th, td { border: 1px solid #d0d7de; padding: 0.5em 0.8em; text-align: left; } th { background: #e6eaef; } hr { border: 0; border-top: 1px solid #d0d7de; margin: 2em 0; } .badge { background: #2c3e50; color: white; padding: 0.2em 0.6em; border-radius: 12px; font-size: 0.8em; font-weight: 600; } .highlight { background: #fef9e7; padding: 0.1em 0.3em; border-radius: 3px; }
-
 # Retrier
 
 **Retrier** is a Go library for building resilient, scalable task processing systems. It provides:
@@ -147,6 +145,31 @@ When you store a `Task`, you must preserve at least the following fields so that
 Additionally, each `TaskExecutionResult` should be stored to keep a history of attempts. The `SaveTask` method receives both the updated task and the result of the latest attempt. The manager updates the task’s `Retries`, `LastRun`, `NextRun`, and `Status` **before** calling `SaveTask`. Therefore, your store should simply persist the given `Task` and `TaskExecutionResult` as is.
 
 **Important:** The manager expects `GetTasks()` to return only tasks that are ready to be executed (i.e., `Status` is `pending` or `suspended` and `NextRun` is in the past). This is crucial for correct retry timing.
+
+### In-Memory Store (MemStore)
+
+For convenience, the package provides an in‑memory implementation of the `Store` interface called `MemStore`. It is designed for **testing and development**, not for production. `MemStore` stores only tasks that are not finished (i.e., status is `pending` or `suspended`). Completed tasks (success or failure) are ignored, making it suitable for testing retry workflows without a real database.
+
+It is thread‑safe and keeps a copy of the tasks in a slice. Each call to `GetTasks()` returns a fresh copy to avoid external modifications.
+
+**Example usage:**
+
+```go
+store := retrier.NewMemStore()
+task := &retrier.Task{
+    ID:     retrier.GetID(),
+    Worker: "test-worker",
+    Status: retrier.StatusPending,
+}
+_ = store.SaveTask(task, nil)
+
+tasks, _ := store.GetTasks()
+// tasks contains the pending task
+```
+
+When a task finishes (status becomes `success` or `failure`), it will be automatically skipped on subsequent `SaveTask` calls, so it won't be returned by `GetTasks()`.
+
+This store is especially useful in unit tests where you want to simulate the persistence layer without external dependencies.
 
 ---
 
