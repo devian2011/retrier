@@ -82,7 +82,7 @@ The `Manager` uses a `Breaker` interface, so you can plug in any implementation.
 
 ### Creating a standalone worker
 
-```
+```go
 package main
 
 import (
@@ -131,7 +131,7 @@ func main() {
 
 ### Using the Manager with multiple workers and circuit breakers
 
-```
+```go
 package main
 
 import (
@@ -213,7 +213,7 @@ If you pass `nil` as the breaker, the manager will skip circuit‑breaker checks
 
 Set the `BackOffCode` and `BackOffParams` on a `Task`. For example, an exponential backoff with jitter:
 
-```
+```go
 task := retrier.Task{
 	ID:           retrier.GetID(),
 	Worker:       "myWorker",
@@ -243,7 +243,7 @@ Your `WorkerFn` returns a `(string, *ExecutionError)`. The `ExecutionError` carr
 
 Example:
 
-```
+```go
 workerFn := func(payload []byte) (string, *retrier.ExecutionError) {
 	if string(payload) == "invalid" {
 		return "", &retrier.ExecutionError{
@@ -277,7 +277,7 @@ workerFn := func(payload []byte) (string, *retrier.ExecutionError) {
 
 The `Manager` uses a `Store` interface:
 
-```
+```go
 type Store interface {
 	GetTasks() ([]Task, error)
 	SaveTask(task *Task, result *TaskExecutionResult) error
@@ -292,7 +292,7 @@ If `SaveTask` returns an error, the result is appended to an in‑memory buffer 
 
 Register your own strategy with the global `BackOffStrategy`:
 
-```
+```go
 strategy := retrier.NewBackOffStrategy()
 strategy.Register("my-custom", func(params retrier.BackOffParams) (time.Time, error) {
 	// Compute next time based on params.GetRetries(), params.GetBackOffParams()...
@@ -306,7 +306,7 @@ Then set `task.BackOffCode = "my-custom"`.
 
 ## Full Example with Retry Loop
 
-```
+```go
 ctx := context.Background()
 
 workerFn := func(payload []byte) (string, *retrier.ExecutionError) {
