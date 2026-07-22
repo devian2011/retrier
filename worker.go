@@ -129,7 +129,7 @@ func (w *Worker) GetOutChan() chan WorkerExecutionResult {
 	return w.outQueue
 }
 
-// Submit non-blockingly attempts to feed a task into the queue.
+// Submit non-blocking attempts to feed a task into the queue.
 // If all current workers are busy, it scales up by spawning a new goroutine (up to maxWorkers).
 // If the pool is saturated, it blocks until a worker is free or the context is cancelled.
 func (w *Worker) Submit(task *Task) error {
@@ -224,9 +224,6 @@ func (w *Worker) runWorker() {
 	defer timer.Stop()
 
 	for {
-		// Clean the timer channel prior to resetting.
-		// This protects against race conditions where an expired but unprocessed
-		// timer tick triggers a false shutdown on the following loop iteration.
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
@@ -237,20 +234,24 @@ func (w *Worker) runWorker() {
 
 		select {
 		case <-w.cancelCtx.Done():
-			return // Context canceled via Stop or Suspend routines.
+			return
 		case <-timer.C:
-			// Dynamic scale-down: terminate surplus goroutines exceeding the min floor limit.
-			if w.activeWorkers.Load() > w.minWorkers {
-				return
+			for {
+				current := w.activeWorkers.Load()
+				if current <= w.minWorkers {
+					break
+				}
+				if w.activeWorkers.CompareAndSwap(current, current-1) {
+					return
+				}
 			}
 		case task, ok := <-w.inQueue:
 			if !ok {
-				return // Channel closed via explicit pool shutdown sequence.
+				return
 			}
 
 			w.activeTasks.Add(1)
 
-			// Initialize base execution state records.
 			tr := &TaskExecutionResult{
 				ID:            getID(),
 				TaskID:        task.ID,
@@ -274,7 +275,6 @@ func (w *Worker) runWorker() {
 				tr.IsCritical = false
 			}
 
-			// Forward the telemetry outcomes to the output broadcasting channel.
 			select {
 			case w.outQueue <- WorkerExecutionResult{task: task, result: tr}:
 			case <-w.cancelCtx.Done():

@@ -514,18 +514,18 @@ func TestManager_PipelineAndBufferFallback(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	mgr.mtx.Lock()
+	mgr.bufferMtx.Lock()
 	bufLen := len(mgr.buffer)
-	mgr.mtx.Unlock()
+	mgr.bufferMtx.Unlock()
 	if bufLen != 1 {
 		t.Errorf("buffer size expected 1, got %d", bufLen)
 	}
 
 	store.SetSaveErr(nil)
 	mgr.flushBuffer()
-	mgr.mtx.Lock()
+	mgr.bufferMtx.Lock()
 	bufLen = len(mgr.buffer)
-	mgr.mtx.Unlock()
+	mgr.bufferMtx.Unlock()
 	if bufLen != 0 {
 		t.Errorf("buffer should be empty, got %d", bufLen)
 	}
@@ -550,7 +550,7 @@ func TestManager_GracefulStop(t *testing.T) {
 	}
 }
 
-func TestManager_StopTwice(t *testing.T) {
+func TestManager_StopTwice(*testing.T) {
 	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	mgr.Start()
 	mgr.Stop()

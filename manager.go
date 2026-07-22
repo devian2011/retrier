@@ -67,6 +67,7 @@ type Manager struct {
 
 	isWorking bool
 
+	bufferMtx     sync.Mutex
 	buffer        []WorkerExecutionResult
 	maxBufferSize int
 
@@ -132,9 +133,11 @@ func (m *Manager) saveResult() {
 	defer m.wg.Done()
 	for {
 		select {
-		case <-m.ctx.Done():
-			return
-		case r := <-m.unionQueue:
+		case r, ok := <-m.unionQueue:
+			if !ok {
+				return
+			}
+
 			r.task.Retries++
 			r.task.LastRun = r.result.RunAt
 
@@ -171,14 +174,16 @@ func (m *Manager) saveResult() {
 
 			if saveErr != nil {
 				m.logger.Errorf("save task failed: %v", saveErr)
-				m.mtx.Lock()
+				m.bufferMtx.Lock()
 				if len(m.buffer) >= m.maxBufferSize {
 					m.logger.Errorf("retry manager: buffer size exceeds max buffer size, dropping task")
 				} else {
 					m.buffer = append(m.buffer, r)
 				}
-				m.mtx.Unlock()
+				m.bufferMtx.Unlock()
 			}
+		case <-m.ctx.Done():
+			return
 		}
 	}
 }
@@ -226,9 +231,11 @@ func (m *Manager) getRetriableTasks() {
 		case <-m.ctx.Done():
 			return
 		case <-timer.C:
+			m.bufferMtx.Lock()
 			if len(m.buffer) > 0 {
 				continue
 			}
+			m.bufferMtx.Unlock()
 
 			tasks, getErr := m.store.GetTasks()
 			if getErr != nil {
@@ -307,13 +314,13 @@ func (m *Manager) saveUnknownWorkerTask(task *Task) {
 	saveErr := m.store.SaveTask(task, tr.result)
 	if saveErr != nil {
 		m.logger.Errorf("retrier: save task failed: %v", saveErr)
-		m.mtx.Lock()
+		m.bufferMtx.Lock()
 		if len(m.buffer) >= m.maxBufferSize {
 			m.logger.Errorf("retrier: buffer size exceeds max buffer size, dropping task")
 		} else {
 			m.buffer = append(m.buffer, tr)
 		}
-		m.mtx.Unlock()
+		m.bufferMtx.Unlock()
 	}
 }
 
@@ -336,8 +343,8 @@ func (m *Manager) diskBufferSwap() {
 
 // flushBuffer iterates over buffered items and saves them to the store.
 func (m *Manager) flushBuffer() {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
+	m.bufferMtx.Lock()
+	defer m.bufferMtx.Unlock()
 
 	if len(m.buffer) == 0 {
 		return
@@ -353,23 +360,21 @@ func (m *Manager) flushBuffer() {
 	m.buffer = failed
 }
 
-// Stop gracefully shuts down the manager, cancels all workers, and waits for completion.
+// Stop gracefully shuts down the manager, ensures all results are persisted,
+// and waits for all goroutines to finish.
 func (m *Manager) Stop() {
 	m.mtx.Lock()
+	defer m.mtx.Unlock()
 	if !m.isWorking {
-		m.mtx.Unlock()
 		return
 	}
 	m.isWorking = false
-	m.mtx.Unlock()
-
-	m.cancel()
-
-	m.mtx.Lock()
 	for _, w := range m.workers {
 		w.Stop()
 	}
-	m.mtx.Unlock()
+	m.flushBuffer()
+	m.cancel()
+	close(m.unionQueue)
 
 	m.wg.Wait()
 }
