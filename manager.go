@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// EventPublisher if we need to get task and task results immediately we can add published for send tasks
+type EventPublisher interface {
+	Publish(event WorkerExecutionResult)
+}
+
 // Breaker defines the public interface for a circuit breaker.
 type Breaker interface {
 	Allow() bool
@@ -69,6 +74,8 @@ type Manager struct {
 
 	pTasksMtx      sync.RWMutex
 	processedTasks map[string]interface{}
+
+	eventPublisher EventPublisher
 }
 
 // NewManager initializes a new Manager with the required dependencies and configurations.
@@ -79,6 +86,7 @@ func NewManager(
 	backOff BackOff,
 	maxBufferSize int,
 	fetchTaskTimeout time.Duration,
+	eventPublisher EventPublisher,
 ) *Manager {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Manager{
@@ -94,6 +102,7 @@ func NewManager(
 		maxBufferSize:    maxBufferSize,
 		fetchTaskTimeout: fetchTaskTimeout,
 		processedTasks:   make(map[string]interface{}),
+		eventPublisher:   eventPublisher,
 	}
 }
 
@@ -151,6 +160,10 @@ func (m *Manager) saveResult() {
 			}
 
 			saveErr := m.store.SaveTask(r.task, r.result)
+
+			if m.eventPublisher != nil {
+				m.eventPublisher.Publish(r)
+			}
 
 			m.pTasksMtx.Lock()
 			delete(m.processedTasks, r.task.ID.String())
@@ -220,11 +233,12 @@ func (m *Manager) getRetriableTasks() {
 				continue
 			}
 
-			newTasks := make([]Task, 0, len(tasks))
+			newTasks := make([]*Task, 0, len(tasks))
 			m.pTasksMtx.RLock()
 			for _, t := range tasks {
+				t := t
 				if _, exists := m.processedTasks[t.ID.String()]; !exists {
-					newTasks = append(newTasks, t)
+					newTasks = append(newTasks, &t)
 				}
 			}
 			m.pTasksMtx.RUnlock()
@@ -232,7 +246,7 @@ func (m *Manager) getRetriableTasks() {
 			for _, task := range newTasks {
 				worker, exists := m.workers[task.Worker]
 				if !exists {
-					m.saveUnknownWorkerTask(&task)
+					m.saveUnknownWorkerTask(task)
 					continue
 				}
 
@@ -246,7 +260,7 @@ func (m *Manager) getRetriableTasks() {
 					}
 				}
 
-				submitErr := worker.Submit(&task)
+				submitErr := worker.Submit(task)
 				if submitErr != nil {
 					if exists && cb != nil {
 						cb.RecordFailure()
@@ -385,13 +399,31 @@ func (m *Manager) UnregisterWorker(name string) {
 	}
 }
 
+// FullWorkerState worker state with data from Circuit Breaker
+type FullWorkerState struct {
+	Status        WorkerStatus        `json:"status"`
+	ActiveTasks   int32               `json:"active_tasks"`
+	ActiveWorkers int32               `json:"active_workers"`
+	CBState       CircuitBreakerState `json:"cb_state"`
+}
+
 // GetWorkerStatuses returns a snapshot of the current state of all registered workers.
-func (m *Manager) GetWorkerStatuses() map[string]WorkerState {
+func (m *Manager) GetWorkerStatuses() map[string]FullWorkerState {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
-	result := make(map[string]WorkerState, len(m.workers))
+	result := make(map[string]FullWorkerState, len(m.workers))
 	for n, w := range m.workers {
-		result[n] = w.GetStatus()
+		ws := w.GetStatus()
+		var cbState CircuitBreakerState
+		if cb, exists := m.breakers[n]; exists {
+			cbState = cb.State()
+		}
+		result[n] = FullWorkerState{
+			Status:        ws.Status,
+			ActiveTasks:   ws.ActiveTasks,
+			ActiveWorkers: ws.ActiveWorkers,
+			CBState:       cbState,
+		}
 	}
 	return result
 }

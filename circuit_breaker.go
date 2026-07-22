@@ -1,4 +1,3 @@
-// circuit_breaker.go
 package retrier
 
 import (
@@ -10,8 +9,11 @@ import (
 type CircuitBreakerState string
 
 const (
-	StateClosed   CircuitBreakerState = "closed"
-	StateOpen     CircuitBreakerState = "open"
+	// StateClosed CB state
+	StateClosed CircuitBreakerState = "closed"
+	// StateOpen CB state
+	StateOpen CircuitBreakerState = "open"
+	// StateHalfOpen CB state
 	StateHalfOpen CircuitBreakerState = "half-open"
 )
 
@@ -98,6 +100,7 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	}
 }
 
+// RecordFailure records a failure execution.
 func (cb *CircuitBreaker) RecordFailure() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()

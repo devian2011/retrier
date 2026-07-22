@@ -172,7 +172,7 @@ func TestCircuitBreaker_Reset(t *testing.T) {
 	}
 }
 
-func TestCircuitBreaker_ConcurrentSafety(t *testing.T) {
+func TestCircuitBreaker_ConcurrentSafety(*testing.T) {
 	cb := NewSlidingWindowCircuitBreaker(1*time.Second, 0.5, 3, 100*time.Millisecond)
 
 	done := make(chan bool, 2)

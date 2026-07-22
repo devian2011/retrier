@@ -67,6 +67,29 @@ func (m *mockBreaker) GetSuccesses() int {
 	return m.successes
 }
 
+// --- Mock EventPublisher (optional, used in tests) ---
+
+type mockEventPublisher struct {
+	mu     sync.Mutex
+	events []WorkerExecutionResult
+}
+
+func (m *mockEventPublisher) Publish(event WorkerExecutionResult) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, event)
+}
+func (m *mockEventPublisher) GetEvents() []WorkerExecutionResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.events
+}
+func (m *mockEventPublisher) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = nil
+}
+
 // --- Mocks ---
 
 type mockManagerWorker struct {
@@ -79,7 +102,7 @@ type mockManagerWorker struct {
 
 func (m *mockManagerWorker) Start() {}
 func (m *mockManagerWorker) Stop()  {}
-func (m *mockManagerWorker) Submit(t *Task) error {
+func (m *mockManagerWorker) Submit(*Task) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.submittedTasks++
@@ -180,7 +203,7 @@ func TestManager_Submit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &mockStore{}
 			store.SetSaveErr(tt.saveErr)
-			mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second)
+			mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 			mgr.isWorking = true
 			err := mgr.Submit(&Task{Worker: "w1"})
 			if (err != nil) != tt.expectErr {
@@ -191,7 +214,7 @@ func TestManager_Submit(t *testing.T) {
 }
 
 func TestManager_Start(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}}
 	_ = mgr.RegisterWorker("w1", w, nil)
 	mgr.Start()
@@ -203,7 +226,7 @@ func TestManager_Start(t *testing.T) {
 }
 
 func TestManager_Lifecycle(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}}
 	b := &mockBreaker{allow: true, state: StateClosed}
 	if err := mgr.RegisterWorker("w1", w, b); err != nil {
@@ -213,6 +236,11 @@ func TestManager_Lifecycle(t *testing.T) {
 	if statuses["w1"].Status != WorkerStatusRunning {
 		t.Errorf("expected WorkerStatusRunning, got %v", statuses["w1"].Status)
 	}
+	// Check that CBState is also returned (should be StateClosed)
+	if statuses["w1"].CBState != StateClosed {
+		t.Errorf("expected CBState StateClosed, got %v", statuses["w1"].CBState)
+	}
+
 	mgr.UnregisterWorker("w1")
 	if _, exists := mgr.workers["w1"]; exists {
 		t.Fatal("worker should be removed")
@@ -223,7 +251,7 @@ func TestManager_Lifecycle(t *testing.T) {
 }
 
 func TestManager_RegisterWorkerAfterStart(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	mgr.Start()
 	defer mgr.Stop()
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusCreated}, outChan: make(chan WorkerExecutionResult)}
@@ -245,7 +273,7 @@ func TestManager_GetRetriableTasks_WithBreaker(t *testing.T) {
 		{ID: uuid.New(), Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
 		{ID: uuid.New(), Worker: "w2", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	w1Out := make(chan WorkerExecutionResult, 10)
 	w1 := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: w1Out}
 	b1 := &mockBreaker{allow: true, state: StateClosed}
@@ -269,7 +297,7 @@ func TestManager_GetRetriableTasks_WithoutBreaker(t *testing.T) {
 	store := &mockStore{}
 	taskID := uuid.New()
 	store.SetTasks([]Task{{ID: taskID, Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3}})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -284,7 +312,7 @@ func TestManager_GetRetriableTasks_WithoutBreaker(t *testing.T) {
 func TestManager_GetRetriableTasks_WorkerNotFound(t *testing.T) {
 	store := &mockStore{}
 	store.SetTasks([]Task{{ID: uuid.New(), Worker: "unknown", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3}})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	mgr.Start()
 	defer mgr.Stop()
 	time.Sleep(50 * time.Millisecond)
@@ -295,7 +323,7 @@ func TestManager_GetRetriableTasks_WorkerNotFound(t *testing.T) {
 
 func TestManager_SaveResult_Logic(t *testing.T) {
 	store := &mockStore{}
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	mgr.Start()
 	defer mgr.Stop()
 
@@ -353,10 +381,32 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 	}
 }
 
+func TestManager_EventPublisher(t *testing.T) {
+	publisher := &mockEventPublisher{}
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, publisher)
+	mgr.Start()
+	defer mgr.Stop()
+
+	task := &Task{ID: uuid.New(), Worker: "w1", Retries: 0, MaxRetries: 3}
+	result := &TaskExecutionResult{Status: StatusSuccess, IsCritical: false, RunAt: time.Now()}
+	mgr.unionQueue <- WorkerExecutionResult{task: task, result: result}
+
+	// Wait for saveResult to process
+	time.Sleep(50 * time.Millisecond)
+
+	events := publisher.GetEvents()
+	if len(events) != 1 {
+		t.Errorf("expected 1 event published, got %d", len(events))
+	}
+	if events[0].task.ID != task.ID {
+		t.Errorf("event task ID mismatch: expected %v, got %v", task.ID, events[0].task.ID)
+	}
+}
+
 func TestManager_PipelineAndBufferFallback(t *testing.T) {
 	store := &mockStore{}
 	store.SetSaveErr(errors.New("db_offline"))
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 1, time.Second)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 1, time.Second, nil)
 	wOut := make(chan WorkerExecutionResult, 5)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -400,7 +450,7 @@ func TestManager_PipelineAndBufferFallback(t *testing.T) {
 }
 
 func TestManager_GracefulStop(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	wOut := make(chan WorkerExecutionResult)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -418,8 +468,8 @@ func TestManager_GracefulStop(t *testing.T) {
 	}
 }
 
-func TestManager_StopTwice(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second)
+func TestManager_StopTwice(*testing.T) {
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	mgr.Start()
 	mgr.Stop()
 	mgr.Stop()
@@ -431,7 +481,7 @@ func TestManager_ProcessedTasksDeduplication(t *testing.T) {
 	store.SetTasks([]Task{
 		{ID: taskID, Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -465,8 +515,7 @@ func TestManager_BreakerRecording(t *testing.T) {
 	store.SetTasks([]Task{
 		{ID: taskID, Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
 	})
-	// Increase fetch timeout so that only one ticker fires during the test.
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 100*time.Millisecond)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 100*time.Millisecond, nil)
 
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut, subErr: errors.New("submit error")}
@@ -476,7 +525,6 @@ func TestManager_BreakerRecording(t *testing.T) {
 	mgr.Start()
 	defer mgr.Stop()
 
-	// Wait a bit more than one ticker interval.
 	time.Sleep(120 * time.Millisecond)
 
 	if b.GetFailures() != 1 {

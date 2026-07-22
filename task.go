@@ -51,6 +51,11 @@ type Task struct {
 	NextRun time.Time `json:"next_run"`
 }
 
+// IsFinished is task finished and will not be retried
+func (t *Task) IsFinished() bool {
+	return t.Status == StatusSuccess || t.Status == StatusFailure || t.MaxRetries <= t.Retries
+}
+
 // GetBackOffCode returns the backoff strategy code.
 func (t *Task) GetBackOffCode() string {
 	return t.BackOffCode
