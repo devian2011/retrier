@@ -67,7 +67,7 @@ func (m *mockBreaker) GetSuccesses() int {
 	return m.successes
 }
 
-// --- Mock EventPublisher (optional, used in tests) ---
+// --- Mock EventPublisher ---
 
 type mockEventPublisher struct {
 	mu     sync.Mutex
@@ -193,11 +193,28 @@ func (m *mockLogger) Errorf(string, ...interface{}) {}
 func TestManager_Submit(t *testing.T) {
 	tests := []struct {
 		name      string
+		task      *Task
 		saveErr   error
 		expectErr bool
 	}{
-		{"Success", nil, false},
-		{"Store error", errors.New("db down"), true},
+		{
+			name:      "Success",
+			task:      &Task{Worker: "w1", Status: StatusPending, MaxRetries: 3},
+			saveErr:   nil,
+			expectErr: false,
+		},
+		{
+			name:      "Store error",
+			task:      &Task{Worker: "w1", Status: StatusPending, MaxRetries: 3},
+			saveErr:   errors.New("db down"),
+			expectErr: true,
+		},
+		{
+			name:      "Task already finished",
+			task:      &Task{Worker: "w1", Status: StatusSuccess, MaxRetries: 3},
+			saveErr:   nil,
+			expectErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -205,7 +222,7 @@ func TestManager_Submit(t *testing.T) {
 			store.SetSaveErr(tt.saveErr)
 			mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 			mgr.isWorking = true
-			err := mgr.Submit(&Task{Worker: "w1"})
+			err := mgr.Submit(tt.task)
 			if (err != nil) != tt.expectErr {
 				t.Errorf("expected error %v, got %v", tt.expectErr, err)
 			}
@@ -236,7 +253,6 @@ func TestManager_Lifecycle(t *testing.T) {
 	if statuses["w1"].Status != WorkerStatusRunning {
 		t.Errorf("expected WorkerStatusRunning, got %v", statuses["w1"].Status)
 	}
-	// Check that CBState is also returned (should be StateClosed)
 	if statuses["w1"].CBState != StateClosed {
 		t.Errorf("expected CBState StateClosed, got %v", statuses["w1"].CBState)
 	}
@@ -270,8 +286,26 @@ func TestManager_RegisterWorkerAfterStart(t *testing.T) {
 func TestManager_GetRetriableTasks_WithBreaker(t *testing.T) {
 	store := &mockStore{}
 	store.SetTasks([]Task{
-		{ID: uuid.New(), Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
-		{ID: uuid.New(), Worker: "w2", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
+		{
+			ID:            uuid.New(),
+			Worker:        "w1",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+		},
+		{
+			ID:            uuid.New(),
+			Worker:        "w2",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+		},
 	})
 	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	w1Out := make(chan WorkerExecutionResult, 10)
@@ -293,10 +327,48 @@ func TestManager_GetRetriableTasks_WithBreaker(t *testing.T) {
 	}
 }
 
+func TestManager_GetRetriableTasks_SkipsFutureTasks(t *testing.T) {
+	store := &mockStore{}
+	future := time.Now().Add(time.Hour)
+	store.SetTasks([]Task{
+		{
+			ID:            uuid.New(),
+			Worker:        "w1",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       future,
+		},
+	})
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	wOut := make(chan WorkerExecutionResult, 10)
+	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
+	_ = mgr.RegisterWorker("w1", w, nil)
+	mgr.Start()
+	defer mgr.Stop()
+	time.Sleep(50 * time.Millisecond)
+	if got := w.GetSubmittedTasks(); got != 0 {
+		t.Errorf("expected 0 Submit (task skipped due to NextRun in future), got %d", got)
+	}
+}
+
 func TestManager_GetRetriableTasks_WithoutBreaker(t *testing.T) {
 	store := &mockStore{}
 	taskID := uuid.New()
-	store.SetTasks([]Task{{ID: taskID, Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3}})
+	store.SetTasks([]Task{
+		{
+			ID:            taskID,
+			Worker:        "w1",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+		},
+	})
 	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
@@ -311,7 +383,18 @@ func TestManager_GetRetriableTasks_WithoutBreaker(t *testing.T) {
 
 func TestManager_GetRetriableTasks_WorkerNotFound(t *testing.T) {
 	store := &mockStore{}
-	store.SetTasks([]Task{{ID: uuid.New(), Worker: "unknown", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3}})
+	store.SetTasks([]Task{
+		{
+			ID:            uuid.New(),
+			Worker:        "unknown",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+		},
+	})
 	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	mgr.Start()
 	defer mgr.Stop()
@@ -372,7 +455,7 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 		t.Error("NextRun should be set in future")
 	}
 
-	// Failure with retries == max - set Retries=2 so after increment it becomes 3 == MaxRetries
+	// Failure with retries == max
 	taskMax := &Task{ID: uuid.New(), Worker: "w1", Retries: 2, MaxRetries: 3}
 	resultMax := &TaskExecutionResult{Status: StatusFailure, IsCritical: false, RunAt: time.Now()}
 	sendAndWait(taskMax, resultMax)
@@ -391,7 +474,6 @@ func TestManager_EventPublisher(t *testing.T) {
 	result := &TaskExecutionResult{Status: StatusSuccess, IsCritical: false, RunAt: time.Now()}
 	mgr.unionQueue <- WorkerExecutionResult{task: task, result: result}
 
-	// Wait for saveResult to process
 	time.Sleep(50 * time.Millisecond)
 
 	events := publisher.GetEvents()
@@ -468,7 +550,7 @@ func TestManager_GracefulStop(t *testing.T) {
 	}
 }
 
-func TestManager_StopTwice(*testing.T) {
+func TestManager_StopTwice(t *testing.T) {
 	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
 	mgr.Start()
 	mgr.Stop()
@@ -479,7 +561,16 @@ func TestManager_ProcessedTasksDeduplication(t *testing.T) {
 	store := &mockStore{}
 	taskID := uuid.New()
 	store.SetTasks([]Task{
-		{ID: taskID, Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
+		{
+			ID:            taskID,
+			Worker:        "w1",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+		},
 	})
 	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
@@ -513,7 +604,16 @@ func TestManager_BreakerRecording(t *testing.T) {
 	store := &mockStore{}
 	taskID := uuid.New()
 	store.SetTasks([]Task{
-		{ID: taskID, Worker: "w1", BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second}, Retries: 0, MaxRetries: 3},
+		{
+			ID:            taskID,
+			Worker:        "w1",
+			BackOffCode:   LinearBackOff,
+			BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+			Retries:       0,
+			MaxRetries:    3,
+			Status:        StatusPending,
+			NextRun:       time.Time{},
+		},
 	})
 	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 100*time.Millisecond, nil)
 

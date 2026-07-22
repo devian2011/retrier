@@ -185,6 +185,10 @@ func (m *Manager) saveResult() {
 
 // Submit saves a task to the store without executing it immediately.
 func (m *Manager) Submit(task *Task) error {
+	if task.IsFinished() {
+		return fmt.Errorf("task already finished")
+	}
+
 	return m.store.SaveTask(task, nil)
 }
 
@@ -235,8 +239,13 @@ func (m *Manager) getRetriableTasks() {
 
 			newTasks := make([]*Task, 0, len(tasks))
 			m.pTasksMtx.RLock()
+			now := time.Now()
 			for _, t := range tasks {
 				t := t
+				// Skip finished tasks and tasks with NextRun in the future (not ready)
+				if t.IsFinished() || (!t.NextRun.IsZero() && t.NextRun.After(now)) {
+					continue
+				}
 				if _, exists := m.processedTasks[t.ID.String()]; !exists {
 					newTasks = append(newTasks, &t)
 				}
