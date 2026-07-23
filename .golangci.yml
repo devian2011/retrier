@@ -5,6 +5,7 @@ run:
   tests: true
 
 linters:
+  default: none
   enable:
     - govet
     - staticcheck
@@ -23,7 +24,7 @@ linters:
         - fieldalignment
     gosec:
       excludes:
-        - G404
+        - G404  # weak random number generator is acceptable for jitter
     revive:
       rules:
         - name: exported
