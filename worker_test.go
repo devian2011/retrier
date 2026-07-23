@@ -328,7 +328,7 @@ func TestWorker_ExecutionError(t *testing.T) {
 		if resCrit.result.Status != StatusFailure {
 			t.Errorf("critical error status %s, expected Failure", resCrit.result.Status)
 		}
-		if string(resCrit.result.Result) == "" {
+		if len(resCrit.result.Result) == 0 {
 			t.Error("result for critical error is empty")
 		}
 	case <-time.After(2 * time.Second):
@@ -346,7 +346,7 @@ func TestWorker_ExecutionError(t *testing.T) {
 		if resUsual.result.Status != StatusFailure {
 			t.Errorf("usual error status %s, expected Failure", resUsual.result.Status)
 		}
-		if string(resUsual.result.Result) == "" {
+		if len(resUsual.result.Result) == 0 {
 			t.Error("result for usual error is empty")
 		}
 	case <-time.After(2 * time.Second):

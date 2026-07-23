@@ -47,8 +47,8 @@ func (ms *MemStore) SaveTask(t *Task, _ *TaskExecutionResult) error {
 	defer ms.mtx.Unlock()
 
 	// Look for an existing task with the same ID and update it.
-	for i, existing := range ms.store {
-		if existing.ID == t.ID {
+	for i := range ms.store {
+		if ms.store[i].ID == t.ID {
 			ms.store[i] = *t
 			return nil
 		}

@@ -4,30 +4,7 @@ run:
   timeout: 5m
   tests: true
 
-formatters:
-  enable:
-    - gci
-
-linters-settings:
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
-  gosec:
-    excludes:
-      - G404
-  revive:
-    rules:
-      - name: exported
-        severity: warning
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-
 linters:
-  disable-all: true
   enable:
     - govet
     - staticcheck
@@ -39,12 +16,36 @@ linters:
     - revive
     - gocritic
     - unused
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    gosec:
+      excludes:
+        - G404
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
 
-issues:
-  max-issues-per-linter: 0
-  max-same-issues: 0
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck
+formatters:
+  enable:
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/devian2011/retrier)

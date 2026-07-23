@@ -247,14 +247,13 @@ func (m *Manager) getRetriableTasks() {
 			newTasks := make([]*Task, 0, len(tasks))
 			now := time.Now()
 			m.pTasksMtx.RLock()
-			for _, t := range tasks {
-				t := t
+			for i := range tasks {
 				// Skip finished tasks and tasks with NextRun in the future (not ready)
-				if t.IsFinished() || (!t.NextRun.IsZero() && t.NextRun.After(now)) {
+				if tasks[i].IsFinished() || (!tasks[i].NextRun.IsZero() && tasks[i].NextRun.After(now)) {
 					continue
 				}
-				if _, exists := m.processedTasks[t.ID.String()]; !exists {
-					newTasks = append(newTasks, &t)
+				if _, exists := m.processedTasks[tasks[i].ID.String()]; !exists {
+					newTasks = append(newTasks, &tasks[i])
 				}
 			}
 			m.pTasksMtx.RUnlock()
