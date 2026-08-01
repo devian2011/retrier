@@ -358,7 +358,7 @@ func TestManager_GetRetriableTasks_SkipsFutureTasks(t *testing.T) {
 	defer mgr.Stop()
 	time.Sleep(50 * time.Millisecond)
 	if got := w.GetSubmittedTasks(); got != 0 {
-		t.Errorf("expected 0 Submit (task skipped due to NextRun in future), got %d", got)
+		t.Errorf("expected 0 Submit (Task skipped due to NextRun in future), got %d", got)
 	}
 }
 
@@ -386,11 +386,11 @@ func TestManager_GetRetriableTasks_DeadlineExceeded(t *testing.T) {
 	defer mgr.Stop()
 	time.Sleep(50 * time.Millisecond)
 
-	// The task should not be submitted to the worker
+	// The Task should not be submitted to the worker
 	if got := w.GetSubmittedTasks(); got != 0 {
 		t.Errorf("expected 0 Submit (deadline exceeded), got %d", got)
 	}
-	// The store should have saved the task as failure (via saveBadWorkerTask)
+	// The store should have saved the Task as failure (via saveBadWorkerTask)
 	if saved := store.GetSaved(); saved < 1 {
 		t.Errorf("expected at least 1 SaveTask call, got %d", saved)
 	}
@@ -409,7 +409,7 @@ func TestManager_GetRetriableTasks_DeadlineInFuture(t *testing.T) {
 			MaxRetries:    3,
 			Status:        StatusPending,
 			NextRun:       time.Time{},
-			Deadline:      future, // deadline in future, task should be processed
+			Deadline:      future, // deadline in future, Task should be processed
 		},
 	})
 	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
@@ -484,7 +484,7 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 
 	store.ResetDone()
 	sendAndWait := func(task *Task, result *TaskExecutionResult) {
-		mgr.unionQueue <- WorkerExecutionResult{task: task, result: result}
+		mgr.unionQueue <- WorkerExecutionResult{Task: task, Result: result}
 		if err := store.WaitSave(200 * time.Millisecond); err != nil {
 			t.Fatal(err)
 		}
@@ -544,7 +544,7 @@ func TestManager_EventPublisher(t *testing.T) {
 
 	task := &Task{ID: uuid.New(), Worker: "w1", Retries: 0, MaxRetries: 3}
 	result := &TaskExecutionResult{Status: StatusSuccess, IsCritical: false, RunAt: time.Now()}
-	mgr.unionQueue <- WorkerExecutionResult{task: task, result: result}
+	mgr.unionQueue <- WorkerExecutionResult{Task: task, Result: result}
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -552,8 +552,8 @@ func TestManager_EventPublisher(t *testing.T) {
 	if len(events) != 1 {
 		t.Errorf("expected 1 event published, got %d", len(events))
 	}
-	if events[0].task.ID != task.ID {
-		t.Errorf("event task ID mismatch: expected %v, got %v", task.ID, events[0].task.ID)
+	if events[0].Task.ID != task.ID {
+		t.Errorf("event Task ID mismatch: expected %v, got %v", task.ID, events[0].Task.ID)
 	}
 }
 
@@ -571,8 +571,8 @@ func TestManager_PipelineAndBufferFallback(t *testing.T) {
 	store.ResetDone()
 	for i := 0; i < 3; i++ {
 		wOut <- WorkerExecutionResult{
-			task: task,
-			result: &TaskExecutionResult{
+			Task: task,
+			Result: &TaskExecutionResult{
 				ID:         uuid.New(),
 				TaskID:     task.ID,
 				Status:     StatusFailure,
@@ -656,7 +656,7 @@ func TestManager_ProcessedTasksDeduplication(t *testing.T) {
 	}
 	store.ResetDone()
 	result := &TaskExecutionResult{ID: uuid.New(), TaskID: taskID, Status: StatusSuccess}
-	mgr.unionQueue <- WorkerExecutionResult{task: &Task{ID: taskID}, result: result}
+	mgr.unionQueue <- WorkerExecutionResult{Task: &Task{ID: taskID}, Result: result}
 	if err := store.WaitSave(100 * time.Millisecond); err != nil {
 		t.Fatal(err)
 	}

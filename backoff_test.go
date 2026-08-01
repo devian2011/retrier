@@ -128,7 +128,7 @@ func TestJitterLinearBackOff(t *testing.T) {
 	maxExpected := now.Add(duration).Add(time.Duration(jitter) * time.Millisecond).Add(50 * time.Millisecond)
 
 	if res.Before(minExpected) || res.After(maxExpected) {
-		t.Errorf("result %v out of expected jitter execution bounds [%v, %v]", res, minExpected, maxExpected)
+		t.Errorf("Result %v out of expected jitter execution bounds [%v, %v]", res, minExpected, maxExpected)
 	}
 }
 
@@ -236,6 +236,6 @@ func TestJitterExponentialBackoff(t *testing.T) {
 	maxBound := now.Add(4 * time.Second).Add(time.Duration(jitterValue) * time.Millisecond).Add(50 * time.Millisecond)
 
 	if res.Before(minBound) || res.After(maxBound) {
-		t.Errorf("result %v out of expected randomized jitter-exponential bounds [%v, %v]", res, minBound, maxBound)
+		t.Errorf("Result %v out of expected randomized jitter-exponential bounds [%v, %v]", res, minBound, maxBound)
 	}
 }

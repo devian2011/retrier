@@ -34,8 +34,8 @@ func (ms *MemStore) GetTasks() ([]Task, error) {
 	return tasks, nil
 }
 
-// SaveTask stores a task if it is not yet finished (status is not "success" or "failure").
-// If a task with the same ID already exists, it is updated in place.
+// SaveTask stores a Task if it is not yet finished (status is not "success" or "failure").
+// If a Task with the same ID already exists, it is updated in place.
 // This ensures that retry counts, status, and NextRun are kept current.
 func (ms *MemStore) SaveTask(t *Task, _ *TaskExecutionResult) error {
 	// Ignore finished tasks – they are no longer needed for retries.
@@ -46,7 +46,7 @@ func (ms *MemStore) SaveTask(t *Task, _ *TaskExecutionResult) error {
 	ms.mtx.Lock()
 	defer ms.mtx.Unlock()
 
-	// Look for an existing task with the same ID and update it.
+	// Look for an existing Task with the same ID and update it.
 	for i := range ms.store {
 		if ms.store[i].ID == t.ID {
 			ms.store[i] = *t
@@ -54,7 +54,7 @@ func (ms *MemStore) SaveTask(t *Task, _ *TaskExecutionResult) error {
 		}
 	}
 
-	// Otherwise, append the new task.
+	// Otherwise, append the new Task.
 	ms.store = append(ms.store, *t)
 	return nil
 }

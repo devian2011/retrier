@@ -30,10 +30,10 @@ func TestMemStore_SaveTask_AddsPendingTask(t *testing.T) {
 	}
 	tasks, _ := ms.GetTasks()
 	if len(tasks) != 1 {
-		t.Fatalf("expected 1 task, got %d", len(tasks))
+		t.Fatalf("expected 1 Task, got %d", len(tasks))
 	}
 	if tasks[0].ID != task.ID {
-		t.Errorf("task ID mismatch: got %v, want %v", tasks[0].ID, task.ID)
+		t.Errorf("Task ID mismatch: got %v, want %v", tasks[0].ID, task.ID)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestMemStore_SaveTask_UpdatesExistingTask(t *testing.T) {
 
 	tasks, _ := ms.GetTasks()
 	if len(tasks) != 1 {
-		t.Fatalf("expected 1 task, got %d", len(tasks))
+		t.Fatalf("expected 1 Task, got %d", len(tasks))
 	}
 	if tasks[0].Retries != 1 {
 		t.Errorf("expected Retries=1, got %d", tasks[0].Retries)

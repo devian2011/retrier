@@ -80,8 +80,8 @@ func TestWorker_Start(t *testing.T) {
 	w.Stop()
 }
 
-// TestWorker_Submit_Success tests the happy path: submitting a task that
-// completes successfully and produces a result.
+// TestWorker_Submit_Success tests the happy path: submitting a Task that
+// completes successfully and produces a Result.
 func TestWorker_Submit_Success(t *testing.T) {
 	ctx := context.Background()
 	fn := func(_ context.Context, payload []byte) (string, *ExecutionError) {
@@ -100,21 +100,21 @@ func TestWorker_Submit_Success(t *testing.T) {
 
 	select {
 	case res := <-w.GetOutChan():
-		if res.task.ID != task.ID {
-			t.Errorf("task ID mismatch: %s vs %s", res.task.ID, task.ID)
+		if res.Task.ID != task.ID {
+			t.Errorf("Task ID mismatch: %s vs %s", res.Task.ID, task.ID)
 		}
-		if res.result.Status != StatusSuccess {
-			t.Errorf("status %s, expected Success", res.result.Status)
+		if res.Result.Status != StatusSuccess {
+			t.Errorf("status %s, expected Success", res.Result.Status)
 		}
-		if string(res.result.Result) != "processed: hello" {
-			t.Errorf("result %s, expected 'processed: hello'", string(res.result.Result))
+		if string(res.Result.Result) != "processed: hello" {
+			t.Errorf("Result %s, expected 'processed: hello'", string(res.Result.Result))
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for result")
+		t.Fatal("timeout waiting for Result")
 	}
 }
 
-// TestWorker_Submit_WhenNotRunning ensures that submitting a task to a
+// TestWorker_Submit_WhenNotRunning ensures that submitting a Task to a
 // non-running pool returns an error.
 func TestWorker_Submit_WhenNotRunning(t *testing.T) {
 	ctx := context.Background()
@@ -166,7 +166,7 @@ func TestWorker_Submit_ScalingUp(t *testing.T) {
 		select {
 		case <-w.GetOutChan():
 		case <-time.After(1 * time.Second):
-			t.Fatal("timeout waiting for result")
+			t.Fatal("timeout waiting for Result")
 		}
 	}
 }
@@ -225,7 +225,7 @@ func TestWorker_Stop(t *testing.T) {
 	w.SetMinAndMaxWorkers(2, 5)
 	w.Start()
 
-	// Use a slow worker to keep a task active.
+	// Use a slow worker to keep a Task active.
 	fnSlow := func(_ context.Context, _ []byte) (string, *ExecutionError) {
 		time.Sleep(500 * time.Millisecond)
 		return "ok", nil
@@ -238,7 +238,7 @@ func TestWorker_Stop(t *testing.T) {
 	task := &Task{ID: getID(), Payload: []byte("x")}
 	_ = slowWorker.Submit(task)
 
-	// Stop should block until the active task finishes.
+	// Stop should block until the active Task finishes.
 	stopCh := make(chan bool)
 	go func() {
 		slowWorker.Stop()
@@ -249,7 +249,7 @@ func TestWorker_Stop(t *testing.T) {
 	case <-stopCh:
 		// Stop completed.
 	case <-time.After(1 * time.Second):
-		t.Fatal("Stop did not wait for task completion")
+		t.Fatal("Stop did not wait for Task completion")
 	}
 
 	state := slowWorker.GetStatus()
@@ -291,11 +291,11 @@ func TestWorker_Suspend(t *testing.T) {
 		t.Error("expected error when submitting after Suspend")
 	}
 
-	// The active task's result should still arrive.
+	// The active Task's Result should still arrive.
 	select {
 	case <-w.GetOutChan():
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("did not receive result of active task after Suspend")
+		t.Fatal("did not receive Result of active Task after Suspend")
 	}
 }
 
@@ -317,40 +317,40 @@ func TestWorker_ExecutionError(t *testing.T) {
 	taskCrit := &Task{ID: getID(), Payload: []byte("critical")}
 	taskUsual := &Task{ID: getID(), Payload: []byte("usual")}
 
-	// Submit the first task.
+	// Submit the first Task.
 	if err := w.Submit(taskCrit); err != nil {
 		t.Fatalf("Submit taskCrit error: %v", err)
 	}
 
-	// Read its result immediately to unblock the worker.
+	// Read its Result immediately to unblock the worker.
 	select {
 	case resCrit := <-w.GetOutChan():
-		if resCrit.result.Status != StatusFailure {
-			t.Errorf("critical error status %s, expected Failure", resCrit.result.Status)
+		if resCrit.Result.Status != StatusFailure {
+			t.Errorf("critical error status %s, expected Failure", resCrit.Result.Status)
 		}
-		if len(resCrit.result.Result) == 0 {
-			t.Error("result for critical error is empty")
+		if len(resCrit.Result.Result) == 0 {
+			t.Error("Result for critical error is empty")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for critical result")
+		t.Fatal("timeout waiting for critical Result")
 	}
 
-	// Now submit the second task.
+	// Now submit the second Task.
 	if err := w.Submit(taskUsual); err != nil {
 		t.Fatalf("Submit taskUsual error: %v", err)
 	}
 
-	// Read its result.
+	// Read its Result.
 	select {
 	case resUsual := <-w.GetOutChan():
-		if resUsual.result.Status != StatusFailure {
-			t.Errorf("usual error status %s, expected Failure", resUsual.result.Status)
+		if resUsual.Result.Status != StatusFailure {
+			t.Errorf("usual error status %s, expected Failure", resUsual.Result.Status)
 		}
-		if len(resUsual.result.Result) == 0 {
-			t.Error("result for usual error is empty")
+		if len(resUsual.Result.Result) == 0 {
+			t.Error("Result for usual error is empty")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for usual result")
+		t.Fatal("timeout waiting for usual Result")
 	}
 }
 
@@ -391,7 +391,7 @@ func TestWorker_IdleTimeout_ScaleDown(t *testing.T) {
 func TestWorker_ContextCancellationDuringTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fn := func(_ context.Context, _ []byte) (string, *ExecutionError) {
-		time.Sleep(500 * time.Millisecond) // long task
+		time.Sleep(500 * time.Millisecond) // long Task
 		return "ok", nil
 	}
 	w := NewWorker(ctx, fn)
@@ -401,11 +401,11 @@ func TestWorker_ContextCancellationDuringTask(t *testing.T) {
 	task := &Task{ID: getID(), Payload: []byte("x")}
 	_ = w.Submit(task)
 
-	// Cancel the context while the task is running.
+	// Cancel the context while the Task is running.
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 
-	// The worker will finish the current task, then on the next loop iteration
+	// The worker will finish the current Task, then on the next loop iteration
 	// it will see the canceled context and exit. We wait for that.
 	time.Sleep(600 * time.Millisecond)
 

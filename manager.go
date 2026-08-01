@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// EventPublisher if we need to get task and task results immediately we can add published for send tasks
+// EventPublisher if we need to get Task and Task results immediately we can add published for send tasks
 type EventPublisher interface {
 	Publish(event WorkerExecutionResult)
 }
@@ -31,7 +31,7 @@ type ManagerWorker interface {
 	GetStatus() WorkerState
 }
 
-// Store abstracts persistence layer operations for logging and auditing task outcomes.
+// Store abstracts persistence layer operations for logging and auditing Task outcomes.
 type Store interface {
 	GetTasks() ([]Task, error)
 	SaveTask(task *Task, result *TaskExecutionResult) error
@@ -127,7 +127,7 @@ func (m *Manager) resultCollector(results chan WorkerExecutionResult) {
 	}
 }
 
-// saveResult processes incoming task execution results, attempting to store them
+// saveResult processes incoming Task execution results, attempting to store them
 // and routing them to an in-memory buffer if the store fails.
 func (m *Manager) saveResult() {
 	defer m.wg.Done()
@@ -138,45 +138,45 @@ func (m *Manager) saveResult() {
 				return
 			}
 
-			r.task.Retries++
-			r.task.LastRun = r.result.RunAt
+			r.Task.Retries++
+			r.Task.LastRun = r.Result.RunAt
 
-			if r.result.IsCritical {
-				r.task.Status = StatusFailure
+			if r.Result.IsCritical {
+				r.Task.Status = StatusFailure
 			} else {
-				switch r.result.Status {
+				switch r.Result.Status {
 				case StatusFailure:
-					if r.task.Retries >= r.task.MaxRetries {
-						r.task.Status = StatusFailure
-					} else if r.task.Retries < r.task.MaxRetries {
+					if r.Task.Retries >= r.Task.MaxRetries {
+						r.Task.Status = StatusFailure
+					} else if r.Task.Retries < r.Task.MaxRetries {
 						var err error
-						r.task.Status = StatusPending
-						r.task.NextRun, err = m.backOff.Get(r.task)
+						r.Task.Status = StatusPending
+						r.Task.NextRun, err = m.backOff.Get(r.Task)
 						if err != nil {
 							m.logger.Errorf(
-								"retrier: error: Getting next run for task id %v: %v", r.task.ID, err)
+								"retrier: error: Getting next run for Task id %v: %v", r.Task.ID, err)
 						}
 					}
 				case StatusSuccess:
-					r.task.Status = StatusSuccess
+					r.Task.Status = StatusSuccess
 				}
 			}
 
-			saveErr := m.store.SaveTask(r.task, r.result)
+			saveErr := m.store.SaveTask(r.Task, r.Result)
 
 			if m.eventPublisher != nil {
 				m.eventPublisher.Publish(r)
 			}
 
 			m.pTasksMtx.Lock()
-			delete(m.processedTasks, r.task.ID.String())
+			delete(m.processedTasks, r.Task.ID.String())
 			m.pTasksMtx.Unlock()
 
 			if saveErr != nil {
-				m.logger.Errorf("save task failed: %v", saveErr)
+				m.logger.Errorf("save Task failed: %v", saveErr)
 				m.bufferMtx.Lock()
 				if len(m.buffer) >= m.maxBufferSize {
-					m.logger.Errorf("retry manager: buffer size exceeds max buffer size, dropping task")
+					m.logger.Errorf("retry manager: buffer size exceeds max buffer size, dropping Task")
 				} else {
 					m.buffer = append(m.buffer, r)
 				}
@@ -188,10 +188,10 @@ func (m *Manager) saveResult() {
 	}
 }
 
-// Submit saves a task to the store without executing it immediately.
+// Submit saves a Task to the store without executing it immediately.
 func (m *Manager) Submit(task *Task) error {
 	if task.IsFinished() {
-		return fmt.Errorf("task already finished")
+		return fmt.Errorf("Task already finished")
 	}
 
 	return m.store.SaveTask(task, nil)
@@ -274,7 +274,7 @@ func (m *Manager) getRetriableTasks() {
 				cb, exists := m.breakers[task.Worker]
 				if exists && cb != nil {
 					if !cb.Allow() {
-						m.logger.Infof("circuit breaker open for worker %s, skipping task %s",
+						m.logger.Infof("circuit breaker open for worker %s, skipping Task %s",
 							task.Worker, task.ID.String())
 						continue
 					}
@@ -304,8 +304,8 @@ func (m *Manager) getRetriableTasks() {
 // saveBadWorkerTask handles tasks that reference a non-existent worker.
 func (m *Manager) saveBadWorkerTask(task *Task, message []byte) {
 	tr := WorkerExecutionResult{
-		task: task,
-		result: &TaskExecutionResult{
+		Task: task,
+		Result: &TaskExecutionResult{
 			ID:            getID(),
 			TaskID:        task.ID,
 			Status:        StatusFailure,
@@ -315,15 +315,15 @@ func (m *Manager) saveBadWorkerTask(task *Task, message []byte) {
 			ExecutionTime: 0,
 		},
 	}
-	saveErr := m.store.SaveTask(task, tr.result)
+	saveErr := m.store.SaveTask(task, tr.Result)
 	if m.eventPublisher != nil {
 		m.eventPublisher.Publish(tr)
 	}
 	if saveErr != nil {
-		m.logger.Errorf("retrier: save task failed: %v", saveErr)
+		m.logger.Errorf("retrier: save Task failed: %v", saveErr)
 		m.bufferMtx.Lock()
 		if len(m.buffer) >= m.maxBufferSize {
-			m.logger.Errorf("retrier: buffer size exceeds max buffer size, dropping task")
+			m.logger.Errorf("retrier: buffer size exceeds max buffer size, dropping Task")
 		} else {
 			m.buffer = append(m.buffer, tr)
 		}
@@ -359,8 +359,8 @@ func (m *Manager) flushBuffer() {
 
 	var failed []WorkerExecutionResult
 	for _, t := range m.buffer {
-		if err := m.store.SaveTask(t.task, t.result); err != nil {
-			m.logger.Errorf("failed to save data from buffer: %v task: %v", err, t.task)
+		if err := m.store.SaveTask(t.Task, t.Result); err != nil {
+			m.logger.Errorf("failed to save data from buffer: %v Task: %v", err, t.Task)
 			failed = append(failed, t)
 		}
 	}

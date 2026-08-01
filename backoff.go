@@ -33,7 +33,7 @@ const (
 	JitterExponentialBackoff string = "jitter-exponential"
 )
 
-// BackOffParams is an interface that any task or configuration must implement
+// BackOffParams is an interface that any Task or configuration must implement
 // to be used with the backoff strategy. It provides the necessary metadata.
 type BackOffParams interface {
 	// GetBackOffCode returns the identifier of the desired backoff strategy.

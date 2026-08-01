@@ -27,7 +27,7 @@ const (
 type ErrorState string
 
 const (
-	// CriticalState validation error and so on, after that we don't need to retry task
+	// CriticalState validation error and so on, after that we don't need to retry Task
 	CriticalState ErrorState = "critical"
 	// UsualState service unreach or other problem
 	UsualState ErrorState = "usual"
@@ -39,14 +39,14 @@ type ExecutionError struct {
 	State ErrorState
 }
 
-// WorkerFn defines the execution contract for processing a task's raw payload.
-// It returns a result string (or log) and an error if the execution fails.
+// WorkerFn defines the execution contract for processing a Task's raw payload.
+// It returns a Result string (or log) and an error if the execution fails.
 type WorkerFn func(ctx context.Context, payload []byte) (string, *ExecutionError)
 
-// WorkerExecutionResult pairs the original task with its final processing metrics and outcome.
+// WorkerExecutionResult pairs the original Task with its final processing metrics and outcome.
 type WorkerExecutionResult struct {
-	task   *Task
-	result *TaskExecutionResult
+	Task   *Task
+	Result *TaskExecutionResult
 }
 
 // WorkerState exposes the public exportable state snapshot of the worker pool.
@@ -73,10 +73,10 @@ type Worker struct {
 	minWorkers    int32         // Minimum floor limit of goroutines that must remain alive.
 	maxWorkers    int32         // Maximum ceiling limit of concurrent goroutines allowed.
 	activeWorkers atomic.Int32  // Total number of spawned goroutines currently running.
-	activeTasks   atomic.Int32  // Number of goroutines currently processing a task.
+	activeTasks   atomic.Int32  // Number of goroutines currently processing a Task.
 	idleTimeout   time.Duration // Time duration a surplus worker waits before scaling down due to inactivity.
 
-	fn WorkerFn // User-defined function mapping task workloads.
+	fn WorkerFn // User-defined function mapping Task workloads.
 }
 
 // NewWorker constructs and returns a new initialized ManagerWorker pool ready to scale.
@@ -124,12 +124,12 @@ func (w *Worker) GetStatus() WorkerState {
 	}
 }
 
-// GetOutChan get result output channel
+// GetOutChan get Result output channel
 func (w *Worker) GetOutChan() chan WorkerExecutionResult {
 	return w.outQueue
 }
 
-// Submit non-blocking attempts to feed a task into the queue.
+// Submit non-blocking attempts to feed a Task into the queue.
 // If all current workers are busy, it scales up by spawning a new goroutine (up to maxWorkers).
 // If the pool is saturated, it blocks until a worker is free or the context is cancelled.
 func (w *Worker) Submit(task *Task) error {
@@ -163,7 +163,7 @@ func (w *Worker) Submit(task *Task) error {
 		case w.inQueue <- task:
 			return nil
 		case <-w.cancelCtx.Done():
-			return errors.New("worker pool was stopped/suspended while submitting task")
+			return errors.New("worker pool was stopped/suspended while submitting Task")
 		}
 	}
 }
@@ -190,7 +190,7 @@ func (w *Worker) Start() {
 	w.status = WorkerStatusRunning
 }
 
-// Suspend temporarily pauses task processing, cancels the active worker context,
+// Suspend temporarily pauses Task processing, cancels the active worker context,
 // and blocks until all currently executing loops drain safely.
 func (w *Worker) Suspend() {
 	w.mu.Lock()
@@ -281,7 +281,7 @@ func (w *Worker) runWorker() {
 			}
 
 			select {
-			case w.outQueue <- WorkerExecutionResult{task: task, result: tr}:
+			case w.outQueue <- WorkerExecutionResult{Task: task, Result: tr}:
 			case <-w.cancelCtx.Done():
 				w.activeTasks.Add(-1)
 				return
