@@ -184,15 +184,15 @@ func (w *Worker) Submit(task *Task) error {
 		return nil
 	default:
 		// No idle worker – attempt to scale up if under maxWorkers.
-		current := w.activeWorkers.Load()
 		w.cfgMtx.RLock()
-		if current < w.cfg.maxWorkers {
-			if w.activeWorkers.Add(1) <= w.cfg.maxWorkers {
-				w.wg.Add(1)
-				go w.runWorker()
-			} else {
-				w.activeWorkers.Add(-1)
-			}
+		startWait := &sync.WaitGroup{}
+		if w.activeWorkers.Load() < w.cfg.maxWorkers {
+			w.wg.Add(1)
+			startWait.Add(1)
+			go w.runWorker(startWait)
+			startWait.Wait()
+		} else {
+			w.activeWorkers.Add(-1)
 		}
 		w.cfgMtx.RUnlock()
 	}
@@ -235,13 +235,6 @@ func (w *Worker) Start() {
 		// Reset counters – they should already be zero, but we enforce it.
 		w.activeWorkers.Store(0)
 		w.activeTasks.Store(0)
-
-		// The WaitGroup is already zero because Stop() waits for all workers.
-	}
-
-	// Cancel any previous internal context (for suspended or stopped cases).
-	if w.cancelFn != nil {
-		w.cancelFn()
 	}
 
 	// Create a fresh internal context for the new generation of workers.
@@ -251,14 +244,17 @@ func (w *Worker) Start() {
 
 	// Spawn the minimum number of workers.
 	w.cfgMtx.RLock()
-	min := w.cfg.minWorkers
+	minWorkers := w.cfg.minWorkers
 	w.cfgMtx.RUnlock()
 
-	for i := 0; i < int(min); i++ {
-		w.wg.Add(1)
-		w.activeWorkers.Add(1)
-		go w.runWorker()
+	startWait := &sync.WaitGroup{}
+
+	w.wg.Add(int(minWorkers))
+	startWait.Add(int(minWorkers))
+	for i := 0; i < int(minWorkers); i++ {
+		go w.runWorker(startWait)
 	}
+	startWait.Wait()
 
 	w.status = WorkerStatusRunning
 }
@@ -303,7 +299,8 @@ func (w *Worker) Stop() {
 // It processes tasks from the input queue, handles idle timeouts, and supports
 // dynamic scaling down when the pool is over‑provisioned.
 // On exit, it decrements the active worker count.
-func (w *Worker) runWorker() {
+func (w *Worker) runWorker(startWait *sync.WaitGroup) {
+	w.activeWorkers.Add(1)
 	w.cfgMtx.RLock()
 	timer := time.NewTimer(w.cfg.idleTimeout)
 	w.cfgMtx.RUnlock()
@@ -313,6 +310,7 @@ func (w *Worker) runWorker() {
 	defer w.activeWorkers.Add(-1)
 	defer timer.Stop()
 
+	startWait.Done()
 	for {
 		// Reset the idle timer for each loop iteration.
 		if !timer.Stop() {
@@ -345,7 +343,6 @@ func (w *Worker) runWorker() {
 
 		case task, ok := <-w.inQueue:
 			if !ok {
-				// Input queue closed – exit.
 				return
 			}
 

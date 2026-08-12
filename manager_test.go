@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-// --- Thread-safe mock breaker ---
 
 type mockBreaker struct {
 	mu            sync.Mutex
@@ -228,7 +227,7 @@ func TestManager_Submit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &mockStore{}
 			store.SetSaveErr(tt.saveErr)
-			mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
+			mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, nil)
 			mgr.isWorking = true
 			err := mgr.Submit(tt.task)
 			if (err != nil) != tt.expectErr {
@@ -239,7 +238,7 @@ func TestManager_Submit(t *testing.T) {
 }
 
 func TestManager_Start(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, nil)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}}
 	_ = mgr.RegisterWorker("w1", w, nil)
 	mgr.Start()
@@ -251,7 +250,7 @@ func TestManager_Start(t *testing.T) {
 }
 
 func TestManager_Lifecycle(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, nil)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}}
 	b := &mockBreaker{allow: true, state: StateClosed}
 	if err := mgr.RegisterWorker("w1", w, b); err != nil {
@@ -275,7 +274,7 @@ func TestManager_Lifecycle(t *testing.T) {
 }
 
 func TestManager_RegisterWorkerAfterStart(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, nil)
 	mgr.Start()
 	defer mgr.Stop()
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusCreated}, outChan: make(chan WorkerExecutionResult)}
@@ -315,7 +314,7 @@ func TestManager_GetRetriableTasks_WithBreaker(t *testing.T) {
 			NextRun:       time.Time{},
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
 	w1Out := make(chan WorkerExecutionResult, 10)
 	w1 := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: w1Out}
 	b1 := &mockBreaker{allow: true, state: StateClosed}
@@ -350,7 +349,7 @@ func TestManager_GetRetriableTasks_SkipsFutureTasks(t *testing.T) {
 			NextRun:       future,
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -375,10 +374,10 @@ func TestManager_GetRetriableTasks_DeadlineExceeded(t *testing.T) {
 			MaxRetries:    3,
 			Status:        StatusPending,
 			NextRun:       time.Time{},
-			Deadline:      past, // deadline already passed
+			Deadline:      past,
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -386,11 +385,9 @@ func TestManager_GetRetriableTasks_DeadlineExceeded(t *testing.T) {
 	defer mgr.Stop()
 	time.Sleep(50 * time.Millisecond)
 
-	// The Task should not be submitted to the worker
 	if got := w.GetSubmittedTasks(); got != 0 {
 		t.Errorf("expected 0 Submit (deadline exceeded), got %d", got)
 	}
-	// The store should have saved the Task as failure (via saveBadWorkerTask)
 	if saved := store.GetSaved(); saved < 1 {
 		t.Errorf("expected at least 1 SaveTask call, got %d", saved)
 	}
@@ -409,10 +406,10 @@ func TestManager_GetRetriableTasks_DeadlineInFuture(t *testing.T) {
 			MaxRetries:    3,
 			Status:        StatusPending,
 			NextRun:       time.Time{},
-			Deadline:      future, // deadline in future, Task should be processed
+			Deadline:      future,
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -420,7 +417,6 @@ func TestManager_GetRetriableTasks_DeadlineInFuture(t *testing.T) {
 	defer mgr.Stop()
 	time.Sleep(50 * time.Millisecond)
 
-	// Task should be submitted because deadline is in future
 	if got := w.GetSubmittedTasks(); got != 1 {
 		t.Errorf("expected 1 Submit (deadline in future), got %d", got)
 	}
@@ -441,7 +437,7 @@ func TestManager_GetRetriableTasks_WithoutBreaker(t *testing.T) {
 			NextRun:       time.Time{},
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -467,7 +463,7 @@ func TestManager_GetRetriableTasks_WorkerNotFound(t *testing.T) {
 			NextRun:       time.Time{},
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
 	mgr.Start()
 	defer mgr.Stop()
 	time.Sleep(50 * time.Millisecond)
@@ -478,7 +474,7 @@ func TestManager_GetRetriableTasks_WorkerNotFound(t *testing.T) {
 
 func TestManager_SaveResult_Logic(t *testing.T) {
 	store := &mockStore{}
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, nil)
 	mgr.Start()
 	defer mgr.Stop()
 
@@ -494,7 +490,6 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 		store.ResetDone()
 	}
 
-	// Critical error
 	taskCrit := &Task{ID: uuid.New(), Worker: "w1", Retries: 1, MaxRetries: 3}
 	resultCrit := &TaskExecutionResult{Status: StatusFailure, IsCritical: true, RunAt: time.Now()}
 	sendAndWait(taskCrit, resultCrit)
@@ -505,7 +500,6 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 		t.Errorf("retries should be 2, got %d", taskCrit.Retries)
 	}
 
-	// Success
 	taskSucc := &Task{ID: uuid.New(), Worker: "w1", Retries: 0, MaxRetries: 3}
 	resultSucc := &TaskExecutionResult{Status: StatusSuccess, IsCritical: false, RunAt: time.Now()}
 	sendAndWait(taskSucc, resultSucc)
@@ -513,7 +507,6 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 		t.Errorf("success expected Success, got %v", taskSucc.Status)
 	}
 
-	// Failure with retries < max
 	taskFail := &Task{ID: uuid.New(), Worker: "w1", Retries: 1, MaxRetries: 3, BackOffCode: LinearBackOff, BackOffParams: map[BackOffParam]interface{}{DurationKey: 2 * time.Second}}
 	resultFail := &TaskExecutionResult{Status: StatusFailure, IsCritical: false, RunAt: time.Now()}
 	sendAndWait(taskFail, resultFail)
@@ -527,7 +520,6 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 		t.Error("NextRun should be set in future")
 	}
 
-	// Failure with retries == max
 	taskMax := &Task{ID: uuid.New(), Worker: "w1", Retries: 2, MaxRetries: 3}
 	resultMax := &TaskExecutionResult{Status: StatusFailure, IsCritical: false, RunAt: time.Now()}
 	sendAndWait(taskMax, resultMax)
@@ -538,7 +530,7 @@ func TestManager_SaveResult_Logic(t *testing.T) {
 
 func TestManager_EventPublisher(t *testing.T) {
 	publisher := &mockEventPublisher{}
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, publisher)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, publisher)
 	mgr.Start()
 	defer mgr.Stop()
 
@@ -560,7 +552,7 @@ func TestManager_EventPublisher(t *testing.T) {
 func TestManager_PipelineAndBufferFallback(t *testing.T) {
 	store := &mockStore{}
 	store.SetSaveErr(errors.New("db_offline"))
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 1, time.Second, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 1, time.Second, 2*time.Second, nil)
 	wOut := make(chan WorkerExecutionResult, 5)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -599,7 +591,7 @@ func TestManager_PipelineAndBufferFallback(t *testing.T) {
 }
 
 func TestManager_GracefulStop(t *testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, nil)
 	wOut := make(chan WorkerExecutionResult)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -617,8 +609,8 @@ func TestManager_GracefulStop(t *testing.T) {
 	}
 }
 
-func TestManager_StopTwice(*testing.T) {
-	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, nil)
+func TestManager_StopTwice(t *testing.T) {
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, nil)
 	mgr.Start()
 	mgr.Stop()
 	mgr.Stop()
@@ -639,7 +631,7 @@ func TestManager_ProcessedTasksDeduplication(t *testing.T) {
 			NextRun:       time.Time{},
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
 	_ = mgr.RegisterWorker("w1", w, nil)
@@ -682,7 +674,7 @@ func TestManager_BreakerRecording(t *testing.T) {
 			NextRun:       time.Time{},
 		},
 	})
-	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 100*time.Millisecond, nil)
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 100*time.Millisecond, 200*time.Millisecond, nil)
 
 	wOut := make(chan WorkerExecutionResult, 10)
 	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut, subErr: errors.New("submit error")}
@@ -699,5 +691,123 @@ func TestManager_BreakerRecording(t *testing.T) {
 	}
 	if b.GetSuccesses() != 0 {
 		t.Errorf("expected 0 successes, got %d", b.GetSuccesses())
+	}
+}
+
+type callCountingStore struct {
+	mockStore
+	getTasksCalls atomic.Int32
+}
+
+func (s *callCountingStore) GetTasks() ([]Task, error) {
+	s.getTasksCalls.Add(1)
+	return s.mockStore.GetTasks()
+}
+
+func TestManager_ExponentialBackoffWithEmptyTasks(t *testing.T) {
+	store := &callCountingStore{}
+	store.SetTasks([]Task{})
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
+	mgr.Start()
+	defer mgr.Stop()
+
+	time.Sleep(150 * time.Millisecond)
+
+	if store.getTasksCalls.Load() < 3 {
+		t.Errorf("expected at least 3 GetTasks calls, got %d", store.getTasksCalls.Load())
+	}
+}
+
+func TestManager_ExponentialBackoffResetOnTasks(t *testing.T) {
+	store := &callCountingStore{}
+	store.SetTasks([]Task{})
+
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
+	mgr.Start()
+	defer mgr.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	task := Task{
+		ID:            uuid.New(),
+		Worker:        "w1",
+		Status:        StatusPending,
+		MaxRetries:    3,
+		NextRun:       time.Time{},
+		BackOffCode:   LinearBackOff,
+		BackOffParams: map[BackOffParam]interface{}{DurationKey: time.Second},
+	}
+	store.SetTasks([]Task{task})
+	wOut := make(chan WorkerExecutionResult, 10)
+	w := &mockManagerWorker{status: WorkerState{Status: WorkerStatusRunning}, outChan: wOut}
+	_ = mgr.RegisterWorker("w1", w, nil)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if w.GetSubmittedTasks() != 1 {
+		t.Errorf("expected 1 submit after task appears, got %d", w.GetSubmittedTasks())
+	}
+
+	store.SetTasks([]Task{})
+	previousCalls := store.getTasksCalls.Load()
+	time.Sleep(30 * time.Millisecond)
+	if store.getTasksCalls.Load() <= previousCalls {
+		t.Errorf("expected more GetTasks calls after reset, got %d (was %d)", store.getTasksCalls.Load(), previousCalls)
+	}
+}
+
+func TestManager_BufferNonEmptySkipsDB(t *testing.T) {
+	store := &callCountingStore{}
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
+	mgr.Start()
+	defer mgr.Stop()
+
+	mgr.bufferMtx.Lock()
+	mgr.buffer = append(mgr.buffer, WorkerExecutionResult{Task: &Task{ID: uuid.New()}})
+	mgr.bufferMtx.Unlock()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if store.getTasksCalls.Load() > 0 {
+		t.Errorf("expected 0 GetTasks calls when buffer is non-empty, got %d", store.getTasksCalls.Load())
+	}
+}
+
+func TestManager_BufferNonEmptyStillProcessesResults(t *testing.T) {
+	store := &mockStore{}
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
+	mgr.Start()
+	defer mgr.Stop()
+
+	mgr.bufferMtx.Lock()
+	mgr.buffer = append(mgr.buffer, WorkerExecutionResult{Task: &Task{ID: uuid.New()}})
+	mgr.bufferMtx.Unlock()
+
+	task := &Task{ID: uuid.New(), Worker: "w1", Retries: 0, MaxRetries: 3}
+	result := &TaskExecutionResult{Status: StatusSuccess}
+	store.ResetDone()
+	mgr.unionQueue <- WorkerExecutionResult{Task: task, Result: result}
+	if err := store.WaitSave(100 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManager_GetRetriableTasks_StoreErrorResetsBackoff(t *testing.T) {
+	store := &callCountingStore{}
+	mgr := NewManager(context.Background(), store, &mockLogger{}, NewBackOffStrategy(), 2, 10*time.Millisecond, 50*time.Millisecond, nil)
+
+	store.SetGetTasksErr(errors.New("db error"))
+	mgr.Start()
+	defer mgr.Stop()
+
+	time.Sleep(30 * time.Millisecond)
+
+	store.SetGetTasksErr(nil)
+	store.SetTasks([]Task{})
+
+	previousCalls := store.getTasksCalls.Load()
+	time.Sleep(30 * time.Millisecond)
+	if store.getTasksCalls.Load() <= previousCalls {
+		t.Errorf("expected more GetTasks calls after error reset, got %d (was %d)", store.getTasksCalls.Load(), previousCalls)
 	}
 }

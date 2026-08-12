@@ -71,7 +71,8 @@ type Manager struct {
 	buffer        []WorkerExecutionResult
 	maxBufferSize int
 
-	fetchTaskTimeout time.Duration
+	fetchTaskTimeout    time.Duration
+	fetchTaskTimeoutMax time.Duration
 
 	pTasksMtx      sync.RWMutex
 	processedTasks map[string]interface{}
@@ -87,23 +88,25 @@ func NewManager(
 	backOff BackOff,
 	maxBufferSize int,
 	fetchTaskTimeout time.Duration,
+	fetchTaskTimeoutMax time.Duration,
 	eventPublisher EventPublisher,
 ) *Manager {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		ctx:              ctx,
-		cancel:           cancel,
-		store:            store,
-		logger:           logger,
-		backOff:          backOff,
-		breakers:         make(map[string]Breaker),
-		workers:          make(map[string]ManagerWorker),
-		buffer:           make([]WorkerExecutionResult, 0, maxBufferSize),
-		unionQueue:       make(chan WorkerExecutionResult),
-		maxBufferSize:    maxBufferSize,
-		fetchTaskTimeout: fetchTaskTimeout,
-		processedTasks:   make(map[string]interface{}),
-		eventPublisher:   eventPublisher,
+		ctx:                 ctx,
+		cancel:              cancel,
+		store:               store,
+		logger:              logger,
+		backOff:             backOff,
+		breakers:            make(map[string]Breaker),
+		workers:             make(map[string]ManagerWorker),
+		buffer:              make([]WorkerExecutionResult, 0, maxBufferSize),
+		unionQueue:          make(chan WorkerExecutionResult),
+		maxBufferSize:       maxBufferSize,
+		fetchTaskTimeout:    fetchTaskTimeout,
+		fetchTaskTimeoutMax: fetchTaskTimeoutMax,
+		processedTasks:      make(map[string]interface{}),
+		eventPublisher:      eventPublisher,
 	}
 }
 
@@ -191,7 +194,7 @@ func (m *Manager) saveResult() {
 // Submit saves a Task to the store without executing it immediately.
 func (m *Manager) Submit(task *Task) error {
 	if task.IsFinished() {
-		return fmt.Errorf("Task already finished")
+		return fmt.Errorf("task already finished")
 	}
 
 	return m.store.SaveTask(task, nil)
@@ -222,7 +225,8 @@ func (m *Manager) Start() {
 // getRetriableTasks periodically fetches tasks that are due for execution
 // and submits them to the appropriate worker, subject to circuit breaker checks.
 func (m *Manager) getRetriableTasks() {
-	timer := time.NewTimer(m.fetchTaskTimeout)
+	currentTimeout := m.fetchTaskTimeout
+	timer := time.NewTimer(currentTimeout)
 	defer timer.Stop()
 	defer m.wg.Done()
 
@@ -233,6 +237,8 @@ func (m *Manager) getRetriableTasks() {
 		case <-timer.C:
 			m.bufferMtx.Lock()
 			if len(m.buffer) > 0 {
+				m.bufferMtx.Unlock()
+				timer.Reset(100 * time.Millisecond)
 				continue
 			}
 			m.bufferMtx.Unlock()
@@ -240,9 +246,21 @@ func (m *Manager) getRetriableTasks() {
 			tasks, getErr := m.store.GetTasks()
 			if getErr != nil {
 				m.logger.Errorf("retrier: get tasks failed: %v", getErr)
-				timer.Reset(m.fetchTaskTimeout)
+				currentTimeout = m.fetchTaskTimeout
+				timer.Reset(currentTimeout)
 				continue
 			}
+
+			if len(tasks) == 0 {
+				currentTimeout *= 2
+				if currentTimeout > m.fetchTaskTimeoutMax {
+					currentTimeout = m.fetchTaskTimeoutMax
+				}
+				timer.Reset(currentTimeout)
+				continue
+			}
+
+			currentTimeout = m.fetchTaskTimeout
 
 			newTasks := make([]*Task, 0, len(tasks))
 			now := time.Now()
@@ -264,15 +282,19 @@ func (m *Manager) getRetriableTasks() {
 					continue
 				}
 
-				worker, exists := m.workers[task.Worker]
-				if !exists {
+				m.mtx.RLock()
+				worker, wExists := m.workers[task.Worker]
+				cb, cbExists := m.breakers[task.Worker]
+				m.mtx.RUnlock()
+
+				if !wExists {
 					m.saveBadWorkerTask(task, []byte(fmt.Sprintf("retrier: unknown worker %s", task.Worker)))
 					continue
 				}
 
 				// Retrieve circuit breaker for this worker (optional).
 				cb, exists := m.breakers[task.Worker]
-				if exists && cb != nil {
+				if cbExists && cb != nil {
 					if !cb.Allow() {
 						m.logger.Infof("circuit breaker open for worker %s, skipping Task %s",
 							task.Worker, task.ID.String())
@@ -296,7 +318,7 @@ func (m *Manager) getRetriableTasks() {
 					m.pTasksMtx.Unlock()
 				}
 			}
-			timer.Reset(m.fetchTaskTimeout)
+			timer.Reset(currentTimeout)
 		}
 	}
 }
