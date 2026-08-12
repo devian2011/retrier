@@ -245,7 +245,10 @@ func main() {
 	}
 
 	ctx := context.Background()
-	w := retrier.NewWorker(ctx, workerFn)
+	w, err := retrier.NewWorker(ctx, workerFn)
+	if err != nil {
+		panic(err)
+    }
 	w.SetMinAndMaxWorkers(2, 10)
 	w.SetIdleTimeout(5 * time.Second)
 	w.Start()
@@ -323,12 +326,18 @@ func main() {
 		30*time.Second,  // open-state timeout
 	)
 
-	workerA := retrier.NewWorker(ctx, processA) // processA must be func(context.Context, []byte)...
+	workerA, errA := retrier.NewWorker(ctx, processA) // processA must be func(context.Context, []byte)...
+	if errA != nil {
+		panic(errA)
+    }
 	workerA.SetMinAndMaxWorkers(1, 3)
 	manager.RegisterWorker("workerA", workerA, breakerA)
 
 	// WorkerB without circuit breaker (pass nil)
-	workerB := retrier.NewWorker(ctx, processB)
+	workerB, errB := retrier.NewWorker(ctx, processB)
+	if errB != nil {
+		panic(errB)
+	}
 	workerB.SetMinAndMaxWorkers(2, 5)
 	manager.RegisterWorker("workerB", workerB, nil)
 
@@ -513,7 +522,10 @@ workerFn := func(ctx context.Context, payload []byte) (string, *retrier.Executio
 	}
 }
 
-w := retrier.NewWorker(ctx, workerFn)
+w, err := retrier.NewWorker(ctx, workerFn)
+if err != nil {
+	panic(err)
+}
 w.SetMinAndMaxWorkers(1, 2)
 w.Start()
 defer w.Stop()

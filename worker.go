@@ -1,119 +1,148 @@
+// Package retrier provides a dynamic, auto‑scaling worker pool for concurrent task processing.
+// It supports graceful shutdown, suspension, and configurable limits with idle timeout.
 package retrier
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// WorkerStatus represents the current lifecycle state of a ManagerWorker pool.
+// WorkerStatus represents the current lifecycle state of the worker pool.
 type WorkerStatus string
 
 const (
-	// WorkerStatusCreated indicates the worker pool is initialized but not yet processing tasks.
+	// WorkerStatusCreated indicates the pool is initialized but not yet started.
 	WorkerStatusCreated WorkerStatus = "created"
-	// WorkerStatusRunning indicates the worker pool is actively accepting and executing tasks.
+	// WorkerStatusRunning indicates the pool is actively accepting and executing tasks.
 	WorkerStatusRunning WorkerStatus = "running"
-	// WorkerStatusStopped indicates the worker pool is completely shut down and cannot be reused.
+	// WorkerStatusStopped indicates the pool is completely shut down and cannot be reused.
 	WorkerStatusStopped WorkerStatus = "stopped"
-	// WorkerStatusSuspended indicates the worker pool is temporarily paused; active tasks are drained.
+	// WorkerStatusSuspended indicates the pool is temporarily paused; active tasks are drained,
+	// and new submissions are rejected.
 	WorkerStatusSuspended WorkerStatus = "suspended"
 )
 
-// ErrorState error state critical/usual
+// ErrorState classifies errors for retry or abort decisions.
 type ErrorState string
 
 const (
-	// CriticalState validation error and so on, after that we don't need to retry Task
+	// CriticalState marks errors that are unrecoverable (e.g., validation failures).
+	// Tasks with critical errors should not be retried.
 	CriticalState ErrorState = "critical"
-	// UsualState service unreach or other problem
+	// UsualState marks transient errors (e.g., network timeouts) that may be retried.
 	UsualState ErrorState = "usual"
 )
 
-// ExecutionError Worker execution error
+// ExecutionError wraps an error with a state that indicates whether the error is critical.
 type ExecutionError struct {
 	Err   error
 	State ErrorState
 }
 
-// WorkerFn defines the execution contract for processing a Task's raw payload.
-// It returns a Result string (or log) and an error if the execution fails.
+// WorkerFn is the user‑defined function that processes a task payload.
+// It returns a result string and an optional ExecutionError.
+// If the function panics, it is recovered and treated as a critical error.
 type WorkerFn func(ctx context.Context, payload []byte) (string, *ExecutionError)
 
-// WorkerExecutionResult pairs the original Task with its final processing metrics and outcome.
+// WorkerExecutionResult pairs the original Task with its execution result.
 type WorkerExecutionResult struct {
 	Task   *Task
 	Result *TaskExecutionResult
 }
 
-// WorkerState exposes the public exportable state snapshot of the worker pool.
+// WorkerState is a snapshot of the pool's current status.
 type WorkerState struct {
 	Status        WorkerStatus `json:"status"`
-	ActiveTasks   int32        `json:"active_tasks"`
-	ActiveWorkers int32        `json:"active_workers"`
+	ActiveTasks   int32        `json:"active_tasks"`   // number of tasks currently being processed
+	ActiveWorkers int32        `json:"active_workers"` // number of running worker goroutines
 }
 
-// Worker manages a highly concurrent, thread-safe dynamic pool of goroutines
-// that scale up and down automatically based on incoming load constraints.
+// WorkerConfig holds the tunable parameters for the worker pool.
+type WorkerConfig struct {
+	minWorkers  int32         // minimum number of workers always kept alive
+	maxWorkers  int32         // maximum number of workers that can be spawned
+	idleTimeout time.Duration // duration after which an idle worker scales down (if above minWorkers)
+}
+
+// NewWorkerCfg creates a validated WorkerConfig.
+// Returns an error if min > max, any value is negative, or idleTimeout <= 0.
+func NewWorkerCfg(min, max int32, idleTimeout time.Duration) (*WorkerConfig, error) {
+	if min > max {
+		return nil, errors.New("min must be less than max")
+	}
+	if min < 0 || max < 0 {
+		return nil, errors.New("min or max must be greater than 0")
+	}
+	if idleTimeout <= 0 {
+		return nil, errors.New("idleTimeout must be greater than 0 seconds")
+	}
+	return &WorkerConfig{
+		minWorkers:  min,
+		maxWorkers:  max,
+		idleTimeout: idleTimeout,
+	}, nil
+}
+
+// Worker manages a dynamic pool of goroutines that process tasks from an input queue.
+// It scales up when all workers are busy (up to maxWorkers) and scales down when workers
+// are idle for idleTimeout (down to minWorkers). It provides thread‑safe operations for
+// starting, stopping, suspending, and submitting tasks.
 type Worker struct {
-	ctx context.Context
-	wg  sync.WaitGroup // Tracks active worker loops for graceful shutdowns.
+	ctx context.Context // parent context for cancellation propagation
 
-	mu        sync.RWMutex       // Protects the status field from concurrent access/modification.
-	status    WorkerStatus       // Current operational state of the pool.
-	cancelCtx context.Context    // Internal context used to signal individual worker goroutines.
-	cancelFn  context.CancelFunc // Cancels the cancelCtx to trigger scaling down or stopping.
+	cfgMtx sync.RWMutex // protects cfg
+	cfg    *WorkerConfig
 
-	inQueue  chan *Task                 // Unbuffered channel feeding tasks to available workers.
-	outQueue chan WorkerExecutionResult // Channel broadcasting completed execution telemetry.
+	wg sync.WaitGroup // waits for all worker goroutines to finish
 
-	minWorkers    int32         // Minimum floor limit of goroutines that must remain alive.
-	maxWorkers    int32         // Maximum ceiling limit of concurrent goroutines allowed.
-	activeWorkers atomic.Int32  // Total number of spawned goroutines currently running.
-	activeTasks   atomic.Int32  // Number of goroutines currently processing a Task.
-	idleTimeout   time.Duration // Time duration a surplus worker waits before scaling down due to inactivity.
+	mu        sync.RWMutex       // protects status, cancelCtx, cancelFn
+	status    WorkerStatus       // current lifecycle state
+	cancelCtx context.Context    // internal context for cancelling workers
+	cancelFn  context.CancelFunc // cancels cancelCtx
 
-	fn WorkerFn // User-defined function mapping Task workloads.
+	inQueue  chan *Task                 // unbuffered channel for task submissions
+	outQueue chan WorkerExecutionResult // unbuffered channel for task results
+
+	activeWorkers atomic.Int32 // current number of worker goroutines
+	activeTasks   atomic.Int32 // current number of tasks being processed
+
+	fn WorkerFn // user‑defined task processor
+
+	sendMtx sync.Mutex // protects inQueue from concurrent close and send (prevents panic on closed channel)
 }
 
-// NewWorker constructs and returns a new initialized ManagerWorker pool ready to scale.
-func NewWorker(ctx context.Context, fn WorkerFn) *Worker {
+// NewWorker constructs a new worker pool with the given configuration and processing function.
+// The pool starts in the Created state; call Start() to begin processing.
+func NewWorker(ctx context.Context, cfg *WorkerConfig, fn WorkerFn) (*Worker, error) {
 	cancelCtx, cancelFn := context.WithCancel(ctx)
-
 	return &Worker{
 		ctx:       ctx,
 		cancelCtx: cancelCtx,
 		cancelFn:  cancelFn,
-
-		inQueue:  make(chan *Task),
-		outQueue: make(chan WorkerExecutionResult),
-
-		minWorkers:    1,
-		maxWorkers:    1,
-		activeWorkers: atomic.Int32{},
-		activeTasks:   atomic.Int32{},
-		idleTimeout:   time.Second * 5,
-
-		fn:     fn,
-		status: WorkerStatusCreated,
-	}
+		inQueue:   make(chan *Task),
+		outQueue:  make(chan WorkerExecutionResult),
+		cfg:       cfg,
+		fn:        fn,
+		status:    WorkerStatusCreated,
+	}, nil
 }
 
-// SetMinAndMaxWorkers overrides the boundary thresholds for dynamic scaling operations.
-func (w *Worker) SetMinAndMaxWorkers(minWorkers, maxWorkers int32) {
-	w.minWorkers = minWorkers
-	w.maxWorkers = maxWorkers
+// UpdateConfig replaces the current configuration with a new one.
+// The change takes effect immediately for subsequent scaling decisions and idle timeouts.
+// It is safe to call concurrently.
+func (w *Worker) UpdateConfig(cfg *WorkerConfig) {
+	w.cfgMtx.Lock()
+	defer w.cfgMtx.Unlock()
+	w.cfg = cfg
 }
 
-// SetIdleTimeout sets the duration a surplus worker can remain idle before it terminates itself.
-func (w *Worker) SetIdleTimeout(idleTimeout time.Duration) {
-	w.idleTimeout = idleTimeout
-}
-
-// GetStatus returns the current operational status of the worker pool in a thread-safe manner.
+// GetStatus returns a snapshot of the pool's current state.
+// It is safe to call concurrently.
 func (w *Worker) GetStatus() WorkerState {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -124,64 +153,108 @@ func (w *Worker) GetStatus() WorkerState {
 	}
 }
 
-// GetOutChan get Result output channel
+// GetOutChan returns the output channel where completed task results are delivered.
+// The channel is closed when the pool is stopped.
+// If the pool is restarted after Stop, a new channel is created; callers should obtain
+// the new channel again.
 func (w *Worker) GetOutChan() chan WorkerExecutionResult {
 	return w.outQueue
 }
 
-// Submit non-blocking attempts to feed a Task into the queue.
-// If all current workers are busy, it scales up by spawning a new goroutine (up to maxWorkers).
-// If the pool is saturated, it blocks until a worker is free or the context is cancelled.
+// Submit enqueues a task for processing.
+// It attempts a non‑blocking send first; if no worker is idle, it scales up (if possible)
+// and then blocks until the task is accepted or the pool is cancelled/stopped.
+// Returns an error if the pool is not Running.
 func (w *Worker) Submit(task *Task) error {
-	w.mu.RLock()
-	currentStatus := w.status
-	w.mu.RUnlock()
+	// One lock protects the entire operation, including scaling and sending.
+	w.sendMtx.Lock()
+	defer w.sendMtx.Unlock()
 
-	if currentStatus != WorkerStatusRunning {
+	// Pool must be in Running state to accept new tasks.
+	w.mu.RLock()
+	if w.status != WorkerStatusRunning {
+		w.mu.RUnlock()
 		return fmt.Errorf("worker is not running")
 	}
+	w.mu.RUnlock()
 
+	// Try a non‑blocking send to an idle worker.
 	select {
 	case w.inQueue <- task:
-		// Task was immediately accepted by a waiting idle worker.
 		return nil
 	default:
-		// No idle workers are listening on the channel. Attempt to scale up.
-		currentActive := w.activeWorkers.Load()
-		if currentActive < w.maxWorkers {
-			// Atomically reserve a slot to prevent race conditions exceeding maxWorkers limit.
-			if w.activeWorkers.Add(1) <= w.maxWorkers {
+		// No idle worker – attempt to scale up if under maxWorkers.
+		current := w.activeWorkers.Load()
+		w.cfgMtx.RLock()
+		if current < w.cfg.maxWorkers {
+			if w.activeWorkers.Add(1) <= w.cfg.maxWorkers {
 				w.wg.Add(1)
 				go w.runWorker()
 			} else {
-				w.activeWorkers.Add(-1) // Revert allocation if beaten by another thread.
+				w.activeWorkers.Add(-1)
 			}
 		}
+		w.cfgMtx.RUnlock()
+	}
 
-		// Fallback block: await queue availability or pool shutdown signaling.
-		select {
-		case w.inQueue <- task:
-			return nil
-		case <-w.cancelCtx.Done():
-			return errors.New("worker pool was stopped/suspended while submitting Task")
-		}
+	// Block until the task is accepted or the pool is cancelled/stopped.
+	select {
+	case w.inQueue <- task:
+		return nil
+	case <-w.cancelCtx.Done():
+		return errors.New("worker pool was stopped/suspended while submitting Task")
 	}
 }
 
-// Start transitions the pool into a running state and pre-spawns the minimum required workers.
+// Start transitions the pool into the Running state and spawns the minimum number of workers.
+// If the pool is already Running, it does nothing.
+// If it was Suspended, it cancels the previous context to terminate old workers and starts fresh.
+// If it was Stopped, it re‑creates the internal channels (since they were closed by Stop),
+// resets all counters, and starts a new generation of workers.
+// After Start returns, the pool is ready to accept tasks again.
 func (w *Worker) Start() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Already running – nothing to do.
 	if w.status == WorkerStatusRunning {
 		return
 	}
 
+	if w.status == WorkerStatusSuspended {
+		w.status = WorkerStatusRunning
+		return
+	}
+
+	// If the pool was stopped, we need to recreate the channels and reset the state.
+	if w.status == WorkerStatusStopped {
+		// Reassign new channels (old ones are already closed).
+		w.inQueue = make(chan *Task)
+		w.outQueue = make(chan WorkerExecutionResult)
+
+		// Reset counters – they should already be zero, but we enforce it.
+		w.activeWorkers.Store(0)
+		w.activeTasks.Store(0)
+
+		// The WaitGroup is already zero because Stop() waits for all workers.
+	}
+
+	// Cancel any previous internal context (for suspended or stopped cases).
+	if w.cancelFn != nil {
+		w.cancelFn()
+	}
+
+	// Create a fresh internal context for the new generation of workers.
 	cancelCtx, cancelFn := context.WithCancel(w.ctx)
 	w.cancelCtx = cancelCtx
 	w.cancelFn = cancelFn
 
-	for i := 0; i < int(w.minWorkers); i++ {
+	// Spawn the minimum number of workers.
+	w.cfgMtx.RLock()
+	min := w.cfg.minWorkers
+	w.cfgMtx.RUnlock()
+
+	for i := 0; i < int(min); i++ {
 		w.wg.Add(1)
 		w.activeWorkers.Add(1)
 		go w.runWorker()
@@ -190,16 +263,18 @@ func (w *Worker) Start() {
 	w.status = WorkerStatusRunning
 }
 
-// Suspend temporarily pauses Task processing, cancels the active worker context,
-// and blocks until all currently executing loops drain safely.
+// Suspend puts the pool into the Suspended state. It does not cancel existing tasks;
+// it only prevents new submissions. Active tasks continue to completion.
+// The pool can be resumed by calling Start() again.
 func (w *Worker) Suspend() {
 	w.mu.Lock()
 	w.status = WorkerStatusSuspended
 	w.mu.Unlock()
 }
 
-// Stop permanently shuts down the pool, cancels contexts, closes the internal ingestion queue,
-// waits for active processors to exit, and safely shuts down the outcome queue.
+// Stop permanently shuts down the pool. It cancels all workers, waits for them to finish,
+// and closes the input and output channels. After Stop, the pool can be restarted by
+// calling Start() (which will recreate the channels). It is safe to call multiple times.
 func (w *Worker) Stop() {
 	w.mu.Lock()
 	if w.status == WorkerStatusStopped {
@@ -208,52 +283,77 @@ func (w *Worker) Stop() {
 	}
 	w.status = WorkerStatusStopped
 	w.mu.Unlock()
+
+	// Signal all workers to exit.
 	w.cancelFn()
+
+	// Wait for all worker goroutines to finish.
 	w.wg.Wait()
+
+	// Close the input channel under the send mutex to prevent concurrent sends.
+	w.sendMtx.Lock()
 	close(w.inQueue)
+	w.sendMtx.Unlock()
+
+	// Close the output channel (no more workers are alive, so no one will write to it).
 	close(w.outQueue)
 }
 
-// runWorker implements the core lifecycle loop of a separate execution thread.
-// It features an automated zero-allocation dynamic scaling cleanup mechanism.
+// runWorker is the main loop for each worker goroutine.
+// It processes tasks from the input queue, handles idle timeouts, and supports
+// dynamic scaling down when the pool is over‑provisioned.
+// On exit, it decrements the active worker count.
 func (w *Worker) runWorker() {
-	timer := time.NewTimer(w.idleTimeout)
+	w.cfgMtx.RLock()
+	timer := time.NewTimer(w.cfg.idleTimeout)
+	w.cfgMtx.RUnlock()
 
 	defer w.wg.Done()
+	// Ensure that the worker counter is decremented when this goroutine exits.
 	defer w.activeWorkers.Add(-1)
 	defer timer.Stop()
 
 	for {
+		// Reset the idle timer for each loop iteration.
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
 			default:
 			}
 		}
-		timer.Reset(w.idleTimeout)
+		w.cfgMtx.RLock()
+		timer.Reset(w.cfg.idleTimeout)
+		w.cfgMtx.RUnlock()
 
 		select {
 		case <-w.cancelCtx.Done():
+			// Pool is shutting down or suspending – exit gracefully.
 			return
+
 		case <-timer.C:
-			for {
-				current := w.activeWorkers.Load()
-				if current <= w.minWorkers {
-					break
-				}
-				if w.activeWorkers.CompareAndSwap(current, current-1) {
-					return
-				}
+			// Idle timeout fired – check if we can scale down.
+			w.cfgMtx.RLock()
+			current := w.activeWorkers.Load()
+			if current <= w.cfg.minWorkers {
+				w.cfgMtx.RUnlock()
+				continue // cannot go below minimum
 			}
+			w.cfgMtx.RUnlock()
+			// We are above minimum – exit this worker.
+			// The defer will decrease activeWorkers.
+			return
+
 		case task, ok := <-w.inQueue:
 			if !ok {
+				// Input queue closed – exit.
 				return
 			}
 
 			w.activeTasks.Add(1)
 
+			// Prepare the execution result record.
 			tr := &TaskExecutionResult{
-				ID:            getID(),
+				ID:            getID(), // assume getID() returns a unique identifier
 				TaskID:        task.ID,
 				Status:        StatusPending,
 				RunAt:         time.Now(),
@@ -267,11 +367,25 @@ func (w *Worker) runWorker() {
 			}
 
 			timeStart := time.Now()
-			execRes, execErr := w.fn(ctx, task.Payload)
+
+			// Execute the user function with panic recovery.
+			execRes, execErr := func() (result string, err *ExecutionError) {
+				defer func() {
+					if pErr := recover(); pErr != nil {
+						result = ""
+						err = &ExecutionError{
+							Err:   fmt.Errorf("panic: %v, stack: %s", pErr, string(debug.Stack())),
+							State: CriticalState,
+						}
+					}
+				}()
+				return w.fn(ctx, task.Payload)
+			}()
+
 			tr.ExecutionTime = time.Since(timeStart)
 
 			if execErr != nil {
-				tr.Result = []byte(fmt.Sprintf("Result: %s, Error: %s", execRes, execErr))
+				tr.Result = []byte(fmt.Sprintf("Result: %s, Error: %v", execRes, execErr.Err))
 				tr.Status = StatusFailure
 				tr.IsCritical = execErr.State == CriticalState
 			} else {
@@ -280,6 +394,8 @@ func (w *Worker) runWorker() {
 				tr.IsCritical = false
 			}
 
+			// Deliver the result. If the pool is cancelled while we try to send,
+			// abandon the result and exit.
 			select {
 			case w.outQueue <- WorkerExecutionResult{Task: task, Result: tr}:
 			case <-w.cancelCtx.Done():
