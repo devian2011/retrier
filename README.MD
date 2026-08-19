@@ -1,36 +1,17 @@
-# Retrier
+# 🔄 Retrier
 
-**Retrier** is a Go library for building resilient, scalable task processing systems. It provides:
+**Retrier** is a Go library for building resilient, scalable task processing systems. It provides a dynamic worker pool, flexible retry policies, orchestration, circuit breakers, and real‑time event streaming.
 
--   A **dynamic worker pool** that scales up/down based on load.
--   **Pluggable backoff strategies** (linear, exponential, with/without jitter) for retries.
--   An **orchestration manager** that routes tasks to named workers, aggregates results, and buffers them when storage is unavailable.
--   **Graceful lifecycle** controls (start, stop, suspend) with context propagation.
--   **Circuit Breaker** with sliding window failure rate detection to protect workers from cascading failures.
--   **Event publishing** – receive real-time notifications for every completed task execution.
--   **Enhanced status** – query worker statuses including circuit breaker state.
--   **Task deadlines** – tasks that exceed their deadline are automatically marked as failed and are not retried.
--   **Context support** – `WorkerFn` now receives a `context.Context`, enabling distributed tracing, cancellation, and deadline propagation.
+**✨ What’s new in this version?**
+
+-   **Worker** now requires an explicit `WorkerConfig` upon creation.
+-   The methods `SetMinAndMaxWorkers` and `SetIdleTimeout` have been **removed** — all parameters are set via `NewWorkerCfg`.
+-   `NewManager` now accepts `fetchTaskTimeout` and `fetchTaskTimeoutMax` for adaptive polling of the store.
+-   `Manager` now fully supports `EventPublisher`, `Breaker`, and extended status reporting.
 
 ---
 
-## Features
-
--   **Automatic worker scaling** – configurable `min`/`max` goroutines, idle timeouts for scale‑down.
--   **Retry policies** – built‑in linear, exponential, and jitter‑based backoff; custom strategies can be registered.
--   **Multi‑worker manager** – each task type can have its own worker pool, all coordinated by a `Manager`.
--   **Result streaming** – consume execution outcomes via channels for real‑time monitoring.
--   **Storage buffering** – if the persistent store (`Store`) fails, results are kept in memory and flushed periodically.
--   **Circuit Breaker** – sliding window failure‑rate based protection. Automatically opens when failure ratio exceeds a threshold, and allows probing after a timeout.
--   **Event Publisher** – implement `EventPublisher` to receive every task result as soon as it is processed (e.g., for notifications, metrics, or logging).
--   **Comprehensive status** – `GetWorkerStatuses()` now returns `FullWorkerState` which includes the circuit breaker state for each worker.
--   **Task Deadlines** – each task can have a `Deadline`; if the deadline passes before execution, the task is marked as failed with a critical error and never retried.
--   **Context support** – `WorkerFn` receives a `context.Context`, enabling distributed tracing, cancellation, and deadline propagation.
--   **Thread‑safe** – all exported methods are safe for concurrent use.
-
----
-
-## Installation
+## 📦 Installation
 
 ```
 go get github.com/devian2011/retrier
@@ -38,256 +19,151 @@ go get github.com/devian2011/retrier
 
 ---
 
-## Core Concepts
+## 🧠 Core Concepts
 
 ### 1\. `Task`
 
-Represents a unit of work. It includes:
-
 -   `ID` (UUID) – unique identifier.
--   `Payload` (byte slice) – the actual data to process.
--   `Worker` – the named worker that should process this task.
--   `Status` – current lifecycle state (`pending`, `success`, `failure`, etc.).
+-   `Payload` (\[\]byte) – data to process.
+-   `Worker` – name of the worker that should handle this task.
+-   `Status` – lifecycle state (`pending`, `success`, `failure`, etc.).
 -   `Retries` / `MaxRetries` – attempt counter and limit.
 -   `BackOffCode` and `BackOffParams` – retry scheduling configuration.
--   `Deadline` (optional) – absolute time by which the task must complete. If the deadline is in the past when the task is picked up, it is immediately marked as failed with a critical state and will not be retried.
--   Timestamps (`CreatedAt`, `LastRun`, `NextRun`) – for scheduling and monitoring.
+-   `Deadline` (optional) – absolute time by which the task must complete.
+-   Timestamps (`CreatedAt`, `LastRun`, `NextRun`).
 
 ### 2\. `TaskExecutionResult`
 
-Records the outcome of a single execution attempt. Contains:
+-   `ID` – unique result record identifier.
+-   `TaskID` – reference to the parent task.
+-   `Status` – success or failure of this attempt.
+-   `RunAt` – execution timestamp.
+-   `Result` (\[\]byte) – output or error message.
+-   `IsCritical` – if `true`, the task is permanently failed.
+-   `ExecutionTime` – duration of the worker call.
 
--   `ID` (UUID) – unique result record identifier.
--   `TaskID` – reference to the parent `Task`.
--   `Status` – success or failure of this specific attempt.
--   `RunAt` – timestamp of the execution.
--   `Result` (\[\]byte) – the output or error message from the worker.
--   `IsCritical` – if true, the task is permanently failed and won't be retried.
--   `ExecutionTime` – duration of the worker function call.
+### 3\. `Worker` – the dynamic pool
 
-### 3\. `Worker`
+A pool of goroutines that executes a user‑defined `WorkerFn`. Scales up when all workers are busy (up to `maxWorkers`) and scales down idle workers (down to `minWorkers`) after `idleTimeout`. Tasks are submitted via `Submit()`, results are read from the channel returned by `GetOutChan()`.
 
-A pool of goroutines that executes a user‑defined `WorkerFn`.  
-It scales up when all workers are busy (up to `maxWorkers`) and scales down idle workers (down to `minWorkers`) after `idleTimeout`.  
-Tasks are submitted via `Submit()`, results are emitted on a channel obtained via `GetOutChan()`.
+Important **The worker function now receives a `context.Context`**: `func(ctx context.Context, payload []byte) (string, *ExecutionError)`. This enables distributed tracing, cancellation, and deadline propagation.
 
-**Context support:** The `WorkerFn` now receives a `context.Context` as its first argument. This allows you to:
+#### New Worker instantiation
 
--   Propagate trace IDs for distributed tracing (e.g., OpenTelemetry).
--   Handle cancellations or deadlines that were set on the task.
--   Pass request-scoped values (e.g., user ID, authentication tokens).
+Instead of `NewWorker(ctx, workerFn)`, you now pass a configuration:
 
-### 4\. `Manager`
+```go
+cfg, _ := NewWorkerCfg(minWorkers, maxWorkers, idleTimeout)
+w, err := NewWorker(ctx, cfg, workerFn)
+```
 
-Orchestrates multiple workers registered by name. It:
+### 4\. `Manager` – orchestrator
 
--   Routes tasks to the correct worker (by `task.Worker`).
--   Aggregates results from all workers into a central channel.
--   Calls `Store.SaveTask()` to persist each result.
--   Buffers results in memory if storage fails, and periodically retries flushing.
--   Integrates with **Circuit Breakers** per worker to prevent overloading failing services.
--   Publishes every completed result via an optional `EventPublisher`.
--   Automatically checks task **deadlines** before submitting to the worker; expired tasks are marked as failed and are never retried.
+Manages multiple workers registered by name. Routes tasks to the correct worker, aggregates results, persists them via `Store`, and buffers them when storage fails. Integrates with **Circuit Breakers**, checks task **deadlines**, and publishes events via `EventPublisher`.
 
 ### 5\. `BackOffStrategy`
 
-A registry of functions that compute the next execution time (`time.Time`) based on a `BackOffParams` object (which `Task` implements).  
-Built‑in strategies:
-
--   `linear` – fixed delay (`duration`)
--   `jitter-linear` – delay + random jitter (default 0.4)
--   `exponential` – `baseDelay * multiplier^(retries-1)`, capped at `maxDelay`
--   `jitter-exponential` – same as exponential with additional jitter (default 0.2)
+Built‑in strategies: `linear`, `jitter-linear`, `exponential`, `jitter-exponential`.
 
 ### 6\. `Circuit Breaker`
 
-A sliding‑window circuit breaker that protects a worker from repeated failures. It tracks success/failure counts over a configurable time window and opens the circuit when the failure rate exceeds a given threshold. While open, requests are rejected (skipped) for that worker. After a timeout, the breaker transitions to `HalfOpen` to allow a single probe request; if it succeeds, the circuit closes; otherwise it re‑opens.
-
-The `Manager` uses a `Breaker` interface, so you can plug in any implementation. The default implementation uses a sliding window with configurable window size, failure threshold, minimum request count, and open‑state timeout.
+Sliding‑window failure‑rate based protection. Opens when the failure ratio exceeds a threshold, and allows probing after a timeout.
 
 ### 7\. `EventPublisher`
 
-An optional interface that allows you to receive real‑time notifications for every completed task execution.
-
-```go
-type EventPublisher interface {
-    Publish(event WorkerExecutionResult)
-}
-```
-
-If you pass a non‑nil publisher to `NewManager`, the `Manager` will call `Publish` after persisting the result (but before removing it from the “in‑flight” set). This can be used for:
-
--   Streaming results to a message queue (e.g., Kafka, RabbitMQ).
--   Sending webhooks or notifications.
--   Feeding metrics and monitoring systems.
--   Triggering downstream workflows.
+Receive real‑time notifications for every completed task execution. Useful for streaming to Kafka, webhooks, metrics, or downstream workflows.
 
 ### 8\. Task Deadlines
 
-You can set a `Deadline` on a `Task` – an absolute time by which the task must be processed. When the manager periodically fetches tasks, it compares the current time with the deadline. If the deadline has already passed (i.e., `task.Deadline.Before(time.Now())`), the task is **never submitted** to the worker. Instead, it is marked as `StatusFailure` with a critical error and will not be retried (even if `MaxRetries` is not exhausted).
+If a task has a `Deadline` and it passes before the task is picked up, it is immediately marked as failed with a critical error and **will not be retried**.
 
-This is useful for time‑sensitive operations such as user requests that have a timeout, or batch jobs that must finish by a certain time.
+### 9\. Context support
 
-The deadline is stored in the `Task` struct and is persisted along with other fields via the `Store` interface.
-
-```go
-type Task struct {
-    // ...
-    Deadline time.Time `json:"deadline"`
-}
-```
-
-Example: if you create a task with a deadline 30 seconds from now, and the system is heavily backlogged, the task will be automatically dropped (marked as failed) once that deadline passes, preventing wasted work and helping maintain SLAs.
-
-### 9\. Context Support
-
-The `WorkerFn` signature now includes a `context.Context` as the first parameter:
-
-```go
-type WorkerFn func(ctx context.Context, payload []byte) (string, *ExecutionError)
-```
-
-When a task is submitted, you can attach a context to it (e.g., through a separate field or via a wrapper). The worker will pass this context to your function, enabling:
-
--   **Distributed tracing** – create spans inside your task using OpenTelemetry.
--   **Cancellation** – cancel long‑running tasks if needed.
--   **Deadline propagation** – if the context carries a deadline, it will be respected.
-
-If no context is attached to the task, the worker uses its own background context.
+The `WorkerFn` receives a `context.Context`, enabling: distributed tracing, cancellation, deadline propagation, and passing request‑scoped values.
 
 ---
 
-## Persistence – Store Interface
+## 💾 `Store` interface – persistence
 
-The `Manager` relies on a `Store` interface to persist tasks and results. To implement your own storage backend, you need to understand what fields are used for retry scheduling.
+The manager relies on a `Store` to persist tasks and results. To ensure correct retry scheduling, you must store at least:
 
-```go
-type Store interface {
-    // GetTasks must return tasks that are eligible for execution:
-    //   - Status is either "pending" or "suspended"
-    //   - NextRun is in the past (or zero)
-    GetTasks() ([]Task, error)
+-   `ID`, `Worker`, `Status`, `Retries`, `MaxRetries`
+-   `BackOffCode`, `BackOffParams`, `CreatedAt`, `LastRun`, `NextRun`
+-   `Payload`, `Deadline`
 
-    // SaveTask persists a task and its execution result.
-    // If result is nil, it means the task is being saved for the first time (submit).
-    SaveTask(task *Task, result *TaskExecutionResult) error
-}
-```
+`GetTasks()` must return only tasks that are ready to execute (`Status` = `pending` or `suspended`, `NextRun` in the past).
 
-**What to store for retry functionality?**
-
-When you store a `Task`, you must preserve at least the following fields so that the `Manager` can correctly schedule retries:
-
--   `ID` – to identify the task.
--   `Worker` – which worker pool to route to.
--   `Status` – pending, suspended, success, or failure.
--   `Retries` – current attempt count.
--   `MaxRetries` – maximum allowed attempts.
--   `BackOffCode` and `BackOffParams` – used to compute `NextRun`.
--   `CreatedAt`, `LastRun`, `NextRun` – scheduling timestamps.
--   `Payload` – the actual data to be processed.
--   `Deadline` – if set, the time by which the task must be completed.
-
-Additionally, each `TaskExecutionResult` should be stored to keep a history of attempts. The `SaveTask` method receives both the updated task and the result of the latest attempt. The manager updates the task’s `Retries`, `LastRun`, `NextRun`, and `Status` **before** calling `SaveTask`. Therefore, your store should simply persist the given `Task` and `TaskExecutionResult` as is.
-
-**Important:** The manager expects `GetTasks()` to return only tasks that are ready to be executed (i.e., `Status` is `pending` or `suspended` and `NextRun` is in the past). This is crucial for correct retry timing.
-
-### In-Memory Store (MemStore)
-
-For convenience, the package provides an in‑memory implementation of the `Store` interface called `MemStore`. It is designed for **testing and development**, not for production. `MemStore` stores only tasks that are not finished (i.e., status is `pending` or `suspended`). Completed tasks (success or failure) are ignored, making it suitable for testing retry workflows without a real database.
-
-It is thread‑safe and keeps a copy of the tasks in a slice. Each call to `GetTasks()` returns a fresh copy to avoid external modifications.
-
-**Example usage:**
-
-```go
-store := retrier.NewMemStore()
-task := &retrier.Task{
-    ID:     retrier.GetID(),
-    Worker: "test-worker",
-    Status: retrier.StatusPending,
-}
-_ = store.SaveTask(task, nil)
-
-tasks, _ := store.GetTasks()
-// tasks contains the pending task
-```
-
-When a task finishes (status becomes `success` or `failure`), it will be automatically skipped on subsequent `SaveTask` calls, so it won't be returned by `GetTasks()`.
-
-This store is especially useful in unit tests where you want to simulate the persistence layer without external dependencies.
+`MemStore` is an in‑memory implementation for testing.
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
-### Creating a standalone worker
+### Standalone worker (new API)
 
 ```go
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"time"
-
-	"github.com/devian2011/retrier"
+    "context"
+    "fmt"
+    "log"
+    "time"
+    "github.com/devian2011/retrier"
 )
 
 func main() {
-	// Define your processing function (now with context).
-	workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
-		// You can use ctx for tracing, cancellation, deadlines, etc.
-		// Do some work...
-		result := fmt.Sprintf("processed: %s", string(payload))
-		return result, nil
-	}
-
-	ctx := context.Background()
-	w, err := retrier.NewWorker(ctx, workerFn)
-	if err != nil {
-		panic(err)
+    workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
+        // use ctx for tracing, cancellation, deadlines
+        result := fmt.Sprintf("processed: %s", string(payload))
+        return result, nil
     }
-	w.SetMinAndMaxWorkers(2, 10)
-	w.SetIdleTimeout(5 * time.Second)
-	w.Start()
-	defer w.Stop()
 
-	task := retrier.Task{
-		ID:      retrier.GetID(),
-		Worker:  "default",
-		Payload: []byte("hello world"),
-	}
+    cfg, err := retrier.NewWorkerCfg(2, 10, 5*time.Second)
+    if err != nil {
+        panic(err)
+    }
 
-	if err := w.Submit(task); err != nil {
-		log.Fatal(err)
-	}
+    ctx := context.Background()
+    w, err := retrier.NewWorker(ctx, cfg, workerFn)
+    if err != nil {
+        panic(err)
+    }
 
-	// Read the result.
-	select {
-	case res := <-w.GetOutChan():
-		fmt.Printf("Task %s finished with status %s\n", res.Task.ID, res.Result.Status)
-	case <-time.After(2 * time.Second):
-		log.Fatal("timeout")
-	}
+    w.Start()
+    defer w.Stop()
+
+    task := retrier.Task{
+        ID:      retrier.GetID(),
+        Worker:  "default",
+        Payload: []byte("hello world"),
+    }
+
+    if err := w.Submit(&task); err != nil {
+        log.Fatal(err)
+    }
+
+    select {
+    case res := <-w.GetOutChan():
+        fmt.Printf("Task %s finished with status %s\n", res.Task.ID, res.Result.Status)
+    case <-time.After(2 * time.Second):
+        log.Fatal("timeout")
+    }
 }
 ```
 
-### Using the Manager with multiple workers, circuit breakers, and event publisher
+### Manager with multiple workers, circuit breaker, and event publisher
 
 ```go
 package main
 
 import (
-	"context"
-	"log"
-	"time"
-
-	"github.com/devian2011/retrier"
+    "context"
+    "log"
+    "time"
+    "github.com/devian2011/retrier"
 )
 
-// Implement your own Store, Logger, and EventPublisher.
 type myStore struct{}
 func (s myStore) GetTasks() ([]retrier.Task, error) { /* ... */ }
 func (s myStore) SaveTask(task *retrier.Task, result *retrier.TaskExecutionResult) error { /* ... */ }
@@ -298,85 +174,72 @@ func (l myLogger) Errorf(format string, args ...interface{}) { /* ... */ }
 
 type myEventPublisher struct{}
 func (p myEventPublisher) Publish(event retrier.WorkerExecutionResult) {
-    // e.g., send to Kafka, emit metrics, etc.
     log.Printf("Task %s finished with status %s", event.Task.ID, event.Result.Status)
 }
 
 func main() {
-	ctx := context.Background()
-	store := myStore{}
-	logger := myLogger{}
-	publisher := myEventPublisher{}
+    ctx := context.Background()
+    store := myStore{}
+    logger := myLogger{}
+    publisher := myEventPublisher{}
 
-	manager := retrier.NewManager(
+    // New Manager call – now with fetchTaskTimeout and fetchTaskTimeoutMax
+    manager := retrier.NewManager(
         ctx,
         store,
         logger,
         retrier.NewBackOffStrategy(),
-        1000,               // max buffer size
-        5*time.Second,      // fetch interval
-        publisher,          // can be nil if not needed
+        1000,               // maxBufferSize
+        5*time.Second,      // fetchTaskTimeout (initial poll interval)
+        60*time.Second,     // fetchTaskTimeoutMax (max poll interval)
+        publisher,
     )
 
-	// Create a circuit breaker for workerA
-	breakerA := retrier.NewCircuitBreaker(
-		60*time.Second,  // window size
-		0.5,             // failure threshold (50%)
-		10,              // minimum requests in window
-		30*time.Second,  // open-state timeout
-	)
+    // Circuit breaker for worker "workerA"
+    breakerA := retrier.NewCircuitBreaker(
+        60*time.Second,  // window size
+        0.5,             // failure threshold (50%)
+        10,              // min requests
+        30*time.Second,  // open-state timeout
+    )
 
-	workerA, errA := retrier.NewWorker(ctx, processA) // processA must be func(context.Context, []byte)...
-	if errA != nil {
-		panic(errA)
+    cfgA, _ := retrier.NewWorkerCfg(1, 3, 10*time.Second)
+    workerA, _ := retrier.NewWorker(ctx, cfgA, processA)
+    manager.RegisterWorker("workerA", workerA, breakerA)
+
+    // WorkerB without circuit breaker
+    cfgB, _ := retrier.NewWorkerCfg(2, 5, 10*time.Second)
+    workerB, _ := retrier.NewWorker(ctx, cfgB, processB)
+    manager.RegisterWorker("workerB", workerB, nil)
+
+    manager.Start()
+    defer manager.Stop()
+
+    task := retrier.Task{
+        ID:      retrier.GetID(),
+        Worker:  "workerA",
+        Payload: []byte("data"),
     }
-	workerA.SetMinAndMaxWorkers(1, 3)
-	manager.RegisterWorker("workerA", workerA, breakerA)
-
-	// WorkerB without circuit breaker (pass nil)
-	workerB, errB := retrier.NewWorker(ctx, processB)
-	if errB != nil {
-		panic(errB)
-	}
-	workerB.SetMinAndMaxWorkers(2, 5)
-	manager.RegisterWorker("workerB", workerB, nil)
-
-	manager.Start()
-	defer manager.Stop()
-
-	task := retrier.Task{
-		ID:      retrier.GetID(),
-		Worker:  "workerA",
-		Payload: []byte("data"),
-	}
-	if err := manager.Submit(task); err != nil {
-		log.Fatal(err)
-	}
+    if err := manager.Submit(&task); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
 ---
 
-## Circuit Breaker Configuration
+## ⚙️ Circuit Breaker configuration
 
-The default circuit breaker implementation (`CircuitBreaker`) is configured with four parameters:
-
--   **windowSize** – duration of the sliding window over which success/failure counts are tracked.
--   **failureThreshold** – ratio (0.0 to 1.0) of failures to total requests that triggers the open state.
--   **minRequests** – minimum number of requests in the window before the threshold is evaluated.
--   **timeout** – duration the circuit stays open before transitioning to half‑open.
-
-Example: `NewCircuitBreaker(60*time.Second, 0.5, 10, 30*time.Second)`
-
-When a worker is registered with a breaker, the `Manager` will automatically check `Allow()` before submitting a task. If the breaker is open, the task is skipped (and will be retried later). After each submission attempt, `RecordSuccess()` or `RecordFailure()` is called to update the breaker’s statistics.
-
-If you pass `nil` as the breaker, the manager will skip circuit‑breaker checks entirely.
+-   `windowSize` – duration of the sliding window (e.g., 60s).
+-   `failureThreshold` – failure ratio (0.0 – 1.0).
+-   `minRequests` – minimum requests in the window before evaluation.
+-   `timeout` – duration the circuit stays open before transitioning to `HalfOpen`.
 
 ---
 
-## Enhanced Status – FullWorkerState
+## 📊 Extended status – `FullWorkerState`
 
-The `Manager` now provides a richer status snapshot via `GetWorkerStatuses()`, which returns a map of worker names to `FullWorkerState`:
+`GetWorkerStatuses()` returns a map of worker names to `FullWorkerState`, which includes circuit breaker state:
 
 ```go
 type FullWorkerState struct {
@@ -387,191 +250,69 @@ type FullWorkerState struct {
 }
 ```
 
-This includes both the worker’s own status (`running`, `stopped`, etc.) and the current state of its circuit breaker (`closed`, `open`, `half-open`). This helps you monitor system health and detect issues with specific workers.
-
 ---
 
-## Configuring Retries with Backoff
+## ⏱ Configuring retries with backoff
 
-Set the `BackOffCode` and `BackOffParams` on a `Task`. For example, an exponential backoff with jitter:
+Example task with exponential backoff and jitter:
 
 ```go
 task := retrier.Task{
-	ID:           retrier.GetID(),
-	Worker:       "myWorker",
-	Payload:      []byte("important task"),
-	Retries:      0,
-	MaxRetries:   5,
-	BackOffCode:  retrier.JitterExponentialBackoff,
-	BackOffParams: map[retrier.BackOffParam]interface{}{
-		retrier.BaseDelayKey:  1 * time.Second,
-		retrier.MultiplierKey: 2.0,
-		retrier.MaxDelayKey:   5 * time.Minute,
-		retrier.JitterKey:     0.3,
-	},
+    ID:           retrier.GetID(),
+    Worker:       "myWorker",
+    Payload:      []byte("important task"),
+    Retries:      0,
+    MaxRetries:   5,
+    BackOffCode:  retrier.JitterExponentialBackoff,
+    BackOffParams: map[retrier.BackOffParam]interface{}{
+        retrier.BaseDelayKey:  1 * time.Second,
+        retrier.MultiplierKey: 2.0,
+        retrier.MaxDelayKey:   5 * time.Minute,
+        retrier.JitterKey:     0.3,
+    },
 }
 ```
 
-When a task fails with a `UsualState` error, the `Manager` (or your custom logic) can call `BackOffStrategy.Get(task)` to compute the next `NextRun` time and reschedule it.
-
-### Using Deadlines
-
-You can add a deadline to a task to enforce a maximum processing window. If the task cannot be picked up before the deadline, it will be automatically marked as failed with a critical error.
+### Using deadlines
 
 ```go
 task := retrier.Task{
-	ID:           retrier.GetID(),
-	Worker:       "myWorker",
-	Payload:      []byte("time-sensitive job"),
-	MaxRetries:   3,
-	Deadline:     time.Now().Add(30 * time.Second), // must start within 30 seconds
-}
-```
-
-If the task remains queued past this deadline, the manager will not submit it to the worker and will set its status to `StatusFailure` with a critical error, so it will never be retried.
-
-### Using Context
-
-Your `WorkerFn` receives a context. You can attach values or use it for tracing:
-
-```go
-workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
-    // Extract trace ID from context
-    traceID := ctx.Value("trace_id")
-    // Start a span using OpenTelemetry
-    ctx, span := tracer.Start(ctx, "my-task")
-    defer span.End()
-    // ... your business logic ...
-    return "ok", nil
+    ID:         retrier.GetID(),
+    Worker:     "myWorker",
+    Payload:    []byte("time-sensitive job"),
+    MaxRetries: 3,
+    Deadline:   time.Now().Add(30 * time.Second), // must start within 30s
 }
 ```
 
 ---
 
-## Error Handling
-
-Your `WorkerFn` returns a `(string, *ExecutionError)`. The `ExecutionError` carries:
-
--   `Err` – the underlying error.
--   `State` – either `CriticalState` (permanent failure, no retry) or `UsualState` (transient, should retry).
-
-Example:
-
-```go
-workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
-	if string(payload) == "invalid" {
-		return "", &retrier.ExecutionError{
-			Err:   errors.New("validation failed"),
-			State: retrier.CriticalState,
-		}
-	}
-	// ... simulate network error
-	return "", &retrier.ExecutionError{
-		Err:   errors.New("timeout"),
-		State: retrier.UsualState,
-	}
-}
-```
-
----
-
-## Lifecycle Methods
+## 🧩 Lifecycle methods
 
 | Method | Description |
 | --- | --- |
-| `Worker.Start()` | Spawns the minimum number of workers and sets status to `Running`. |
-| `Worker.Suspend()` | Changes status to `Suspended`; new submissions are rejected, but active tasks run to completion. |
-| `Worker.Stop()` | Cancels the internal context, waits for all goroutines to finish, closes channels, status becomes `Stopped`. |
-| `Manager.Start()` | Starts all registered workers, launches collector and splitter pipelines. |
-| `Manager.Stop()` | Stops all workers, cancels manager context, waits for pipelines. |
+| `Worker.Start()` | Starts the minimum number of workers, status → `Running`. |
+| `Worker.Suspend()` | Suspends accepting new tasks; active tasks continue. |
+| `Worker.Stop()` | Stops all workers, closes channels, status → `Stopped`. |
+| `Manager.Start()` | Starts all registered workers and internal pipelines. |
+| `Manager.Stop()` | Stops workers, flushes buffer, waits for all goroutines. |
 
 ---
 
-## Storage Buffering in Manager
-
-The `Manager` uses a `Store` interface as described above. If `SaveTask` returns an error, the result is appended to an in‑memory buffer (up to `maxBufferSize`). A background goroutine (`diskBufferSwap`) attempts to flush the buffer every minute. You can customise the buffer size and flush interval (currently fixed at 1 minute; you can change it by modifying the source if needed).
-
----
-
-## Custom Backoff Strategies
-
-Register your own strategy with the global `BackOffStrategy`:
+## 🛠 Custom backoff strategies
 
 ```go
 strategy := retrier.NewBackOffStrategy()
 strategy.Register("my-custom", func(params retrier.BackOffParams) (time.Time, error) {
-	// Compute next time based on params.GetRetries(), params.GetBackOffParams()...
-	return time.Now().Add(10 * time.Second), nil
+    // params.GetRetries(), params.GetBackOffParams()...
+    return time.Now().Add(10 * time.Second), nil
 })
 ```
 
-Then set `task.BackOffCode = "my-custom"`.
-
 ---
 
-## Full Example with Retry Loop
-
-```go
-ctx := context.Background()
-
-workerFn := func(ctx context.Context, payload []byte) (string, *retrier.ExecutionError) {
-	// Simulate transient failure.
-	return "", &retrier.ExecutionError{
-		Err:   errors.New("service unavailable"),
-		State: retrier.UsualState,
-	}
-}
-
-w, err := retrier.NewWorker(ctx, workerFn)
-if err != nil {
-	panic(err)
-}
-w.SetMinAndMaxWorkers(1, 2)
-w.Start()
-defer w.Stop()
-
-task := retrier.Task{
-	ID:           retrier.GetID(),
-	Worker:       "default",
-	Payload:      []byte("retry me"),
-	Retries:      0,
-	MaxRetries:   3,
-	BackOffCode:  retrier.ExponentialBackOff,
-	BackOffParams: map[retrier.BackOffParam]interface{}{
-		retrier.BaseDelayKey:  500 * time.Millisecond,
-		retrier.MultiplierKey: 2.0,
-		retrier.MaxDelayKey:   10 * time.Second,
-	},
-}
-
-w.Submit(task)
-
-// In a real system, the manager would handle rescheduling.
-// Here we simulate a simple retry loop.
-for i := 0; i <= task.MaxRetries; i++ {
-	res := <-w.GetOutChan()
-	if res.Result.Status == retrier.StatusSuccess {
-		fmt.Println("Task succeeded")
-		break
-	}
-	// Compute next run using the backoff strategy.
-	strategy := retrier.NewBackOffStrategy()
-	nextTime, _ := strategy.Get(&task)
-	fmt.Printf("Retry attempt %d scheduled at %s\n", i+1, nextTime)
-	// In practice, you would update task.Retries and resubmit.
-}
-```
-
----
-
-## Testing
-
-The package includes a complete test suite. Run:
+## 🧪 Testing
 
 ```
 go test -v ./...
 ```
-
----
-
-_This README describes the entire `retrier` package. For API details, refer to the Go doc comments in the source files._
