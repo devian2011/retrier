@@ -325,6 +325,7 @@ func (m *Manager) getRetriableTasks() {
 
 // saveBadWorkerTask handles tasks that reference a non-existent worker.
 func (m *Manager) saveBadWorkerTask(task *Task, message []byte) {
+	task.Status = StatusFailure
 	tr := WorkerExecutionResult{
 		Task: task,
 		Result: &TaskExecutionResult{
