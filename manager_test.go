@@ -11,6 +11,20 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestUnknownWorkerTaskBecomesTerminal(t *testing.T) {
+	publisher := &mockEventPublisher{}
+	mgr := NewManager(context.Background(), &mockStore{}, &mockLogger{}, NewBackOffStrategy(), 2, time.Second, 2*time.Second, publisher)
+	task := &Task{ID: uuid.New(), Worker: "missing", Status: StatusPending, MaxRetries: 5}
+	mgr.saveBadWorkerTask(task, []byte("unknown worker"))
+	if task.Status != StatusFailure || !task.IsFinished() {
+		t.Fatalf("unknown worker task must terminate, got %s", task.Status)
+	}
+	events := publisher.GetEvents()
+	if len(events) != 1 || events[0].Task.Status != StatusFailure || !events[0].Result.IsCritical {
+		t.Fatal("expected terminal critical failure event")
+	}
+}
+
 type mockBreaker struct {
 	mu            sync.Mutex
 	allow         bool
